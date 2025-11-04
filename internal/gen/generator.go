@@ -103,7 +103,6 @@ func (g *Generator) calculateImports(contract *types.Contract) []string {
 	
 	// Always needed imports for the simplified template
 	importSet["fmt"] = true
-	importSet["github.com/ethereum/go-ethereum/common"] = true
 
 	// Check if we need math/big - only include if it appears in struct fields
 	needsBigInt := false

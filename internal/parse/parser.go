@@ -68,10 +68,9 @@ func parseContract(sourceFile, contractName string, result types.ContractResult)
 		Name:             contractName,
 		SourceFile:       sourceFile,
 		PackageName:      sanitizePackageName(contractName),
-		ABI:              parsedABI,
 		ABIJson:          string(result.ABI),
-		Bytecode:         prefixHex(result.EVM.Bytecode.Object),
-		DeployedBytecode: prefixHex(result.EVM.DeployedBytecode.Object),
+		Bytecode:         types.HexData(prefixHex(result.EVM.Bytecode.Object)),
+		DeployedBytecode: types.HexData(prefixHex(result.EVM.DeployedBytecode.Object)),
 	}
 
 	// Parse methods
@@ -156,8 +155,7 @@ func parseMethods(parsedABI abi.ABI, methodIds map[string]string) ([]types.Metho
 		methods = append(methods, types.Method{
 			Name:         methodName,
 			Signature:    method.Sig,
-			Selector:     prefixHex(selector),
-			ABI:          method,
+			Selector:     types.HexData(prefixHex(selector)),
 			Inputs:       inputs,
 			Outputs:      outputs,
 			InputStruct:  inputStruct,
@@ -196,10 +194,13 @@ func parseEvents(parsedABI abi.ABI) ([]types.Event, error) {
 			Fields: parametersToFields(inputs),
 		}
 
+		// Convert common.Hash to types.Hash
+		var typesHash types.Hash
+		copy(typesHash[:], topic[:])
+		
 		events = append(events, types.Event{
 			Name:   event.Name,
-			Topic:  topic,
-			ABI:    event,
+			Topic:  typesHash,
 			Inputs: inputs,
 			Struct: eventStruct,
 		})
@@ -236,8 +237,7 @@ func parseErrors(parsedABI abi.ABI) ([]types.ContractError, error) {
 		errors = append(errors, types.ContractError{
 			Name:      abiError.Name,
 			Signature: abiError.Sig,
-			Selector:  selector,
-			ABI:       abiError,
+			Selector:  types.HexData(selector),
 			Inputs:    inputs,
 			Struct:    errorStruct,
 		})
@@ -311,7 +311,6 @@ func parseParameters(args abi.Arguments, allowIndexed bool) ([]types.Parameter, 
 		params = append(params, types.Parameter{
 			Name:    sanitizeIdentifier(name),
 			Type:    goType,
-			ABIType: arg.Type,
 			Indexed: allowIndexed && arg.Indexed,
 		})
 	}
@@ -563,6 +562,13 @@ func sanitizeIdentifier(name string) string {
 func exportIdentifier(name string) string {
 	if name == "" {
 		return "Field"
+	}
+	// Handle names starting with underscore
+	if strings.HasPrefix(name, "_") {
+		name = name[1:] // Remove leading underscore
+		if name == "" {
+			return "Field"
+		}
 	}
 	return strings.ToUpper(name[:1]) + name[1:]
 }

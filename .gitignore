@@ -57,3 +57,6 @@ coverage.html
 # Generated files
 /generated/
 /testdata/generated/
+
+# Test artifacts
+/test/out/

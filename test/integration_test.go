@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-package main
+package test
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,10 +10,7 @@ import (
 	"testing"
 
 	"github.com/otherview/solgen/internal/gen"
-	"github.com/otherview/solgen/internal/parse"
-	"github.com/otherview/solgen/internal/types"
 )
-
 
 func TestIntegration_SimpleToken(t *testing.T) {
 	// Test the new pipeline architecture using Docker containers
@@ -23,12 +18,17 @@ func TestIntegration_SimpleToken(t *testing.T) {
 		t.Skip("Docker is not available")
 	}
 
-	// Create temporary directories
-	tempDir := t.TempDir()
-	outputDir := filepath.Join(tempDir, "generated")
+	// Prepare test/out/integration directory (relative to project root)
+	outputDir := "../test/out/integration/simpletoken"
+	if err := os.RemoveAll("../test/out/integration"); err != nil {
+		t.Fatalf("failed to clean integration output directory: %v", err)
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatalf("failed to create integration output directory: %v", err)
+	}
 
 	// Step 1: Use solc docker container to generate combined JSON
-	combinedJSON, err := runSolcDocker("testdata/contracts/SimpleToken.sol")
+	combinedJSON, err := runSolcDocker("data/contracts/SimpleToken.sol")
 	if err != nil {
 		t.Fatalf("solc compilation failed: %v", err)
 	}
@@ -117,8 +117,8 @@ func TestIntegration_SimpleToken(t *testing.T) {
 	expectedContents := []string{
 		"package simpletoken",
 		"func ABI() string",
-		"func HexBytecode() string",
-		"func HexDeployedBytecode() string",
+		"var Bytecode = HexData(",
+		"var DeployedBytecode = HexData(",
 		"func Methods() MethodRegistry",
 		"func Events() EventRegistry",
 		"func Errors() ErrorRegistry",
@@ -146,26 +146,43 @@ func TestIntegration_CLI(t *testing.T) {
 		t.Skip("Docker is not available")
 	}
 
-	tempDir := t.TempDir()
-	outputDir := filepath.Join(tempDir, "generated")
+	// Prepare test/out/integration directory (relative to project root)
+	outputDir := "../test/out/integration/cli"
+	if err := os.RemoveAll("../test/out/integration/cli"); err != nil {
+		t.Fatalf("failed to clean CLI output directory: %v", err)
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatalf("failed to create CLI output directory: %v", err)
+	}
 
 	// Test CLI using pipeline approach
 	// Build the binary first
-	binaryPath := filepath.Join(tempDir, "solgen")
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/solgen")
-
-	if err := buildCmd.Run(); err != nil {
-		t.Fatalf("failed to build solgen binary: %v", err)
+	binaryPath := filepath.Join("../test/out/integration", "solgen")
+	absBinaryPath, _ := filepath.Abs(binaryPath)
+	
+	// Ensure the directory exists for the binary
+	if err := os.MkdirAll(filepath.Dir(absBinaryPath), 0755); err != nil {
+		t.Fatalf("failed to create binary directory: %v", err)
+	}
+	
+	buildCmd := exec.Command("go", "build", "-o", absBinaryPath, "./cmd/solgen")
+	// Set working directory to project root (one level up from test/)
+	projectRoot, _ := filepath.Abs("..")
+	buildCmd.Dir = projectRoot
+	
+	if output, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build solgen binary: %v\nOutput: %s", err, string(output))
 	}
 
 	// Step 1: Generate combined JSON using solc
-	combinedJSON, err := runSolcDocker("testdata/contracts/SimpleToken.sol")
+	combinedJSON, err := runSolcDocker("data/contracts/SimpleToken.sol")
 	if err != nil {
 		t.Fatalf("solc compilation failed: %v", err)
 	}
 
-	// Step 2: Test solgen CLI with the combined JSON
-	cmd := exec.Command(binaryPath, "--out", outputDir)
+	// Step 2: Test solgen CLI with the combined JSON  
+	absOutputDir, _ := filepath.Abs(outputDir)
+	cmd := exec.Command(absBinaryPath, "--out", absOutputDir)
 	cmd.Stdin = strings.NewReader(string(combinedJSON))
 
 	output, err := cmd.CombinedOutput()
@@ -215,98 +232,3 @@ func isDockerAvailable(t *testing.T) bool {
 	return err == nil
 }
 
-func testGeneratedCode(t *testing.T, outputDir string) error {
-	// Create a go.mod for the generated code
-	goModContent := `module generated-test
-
-go 1.21
-
-require (
-	github.com/ethereum/go-ethereum v1.13.5
-)
-`
-	goModPath := filepath.Join(outputDir, "go.mod")
-	if err := os.WriteFile(goModPath, []byte(goModContent), 0644); err != nil {
-		return err
-	}
-
-	// Run go mod tidy to resolve dependencies
-	tidyCmd := exec.Command("go", "mod", "tidy")
-	tidyCmd.Dir = outputDir
-	if output, err := tidyCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("go mod tidy failed: %v\nOutput: %s", err, string(output))
-	}
-
-	// Try to build the generated code
-	buildCmd := exec.Command("go", "build", "./...")
-	buildCmd.Dir = outputDir
-	output, err := buildCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("go build failed: %v\nOutput: %s", err, string(output))
-	}
-	return nil
-}
-
-// processCombinedJSON converts combined JSON to contracts (simplified version of main.go logic)
-func processCombinedJSON(data []byte) ([]*types.Contract, error) {
-	var combined types.CombinedJSON
-	if err := json.Unmarshal(data, &combined); err != nil {
-		return nil, fmt.Errorf("parsing combined JSON: %w", err)
-	}
-
-	// Convert to standard JSON format
-	result, err := convertCombinedToStandard(combined)
-	if err != nil {
-		return nil, fmt.Errorf("converting to standard format: %w", err)
-	}
-
-	// Parse using existing parser
-	contracts, err := parse.ResultWithVersion(result, "0.8.20")
-	if err != nil {
-		return nil, fmt.Errorf("parsing contracts: %w", err)
-	}
-
-	return contracts, nil
-}
-
-// convertCombinedToStandard converts combined JSON to standard CompileResult format
-func convertCombinedToStandard(combined types.CombinedJSON) (*types.CompileResult, error) {
-	result := &types.CompileResult{
-		Contracts: make(map[string]map[string]types.ContractResult),
-	}
-
-	for key, contract := range combined.Contracts {
-		// Parse the key format "filename.sol:ContractName"
-		parts := strings.Split(key, ":")
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid contract key format: %s", key)
-		}
-		filename := parts[0]
-		contractName := parts[1]
-
-		if result.Contracts[filename] == nil {
-			result.Contracts[filename] = make(map[string]types.ContractResult)
-		}
-
-		contractResult := types.ContractResult{
-			ABI: contract.ABI,
-			EVM: types.EVMResult{
-				Bytecode: types.BytecodeResult{
-					Object: contract.Bin,
-				},
-				DeployedBytecode: types.BytecodeResult{
-					Object: contract.BinRuntime,
-				},
-			},
-		}
-
-		// Add method identifiers if available
-		if contract.Hashes != nil {
-			contractResult.EVM.MethodIdentifiers = contract.Hashes
-		}
-
-		result.Contracts[filename][contractName] = contractResult
-	}
-
-	return result, nil
-}

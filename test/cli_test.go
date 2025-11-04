@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-package main
+package test
 
 import (
 	"fmt"
@@ -135,7 +135,7 @@ func TestCLI_ProcessJSON(t *testing.T) {
 	expectedContents := []string{
 		"package simpletoken",
 		"func ABI() string",
-		"func HexBytecode() string",
+		"var Bytecode = HexData(",
 		"func Methods() MethodRegistry",
 		"TransferMethod",
 	}

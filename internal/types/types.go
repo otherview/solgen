@@ -3,11 +3,63 @@
 package types
 
 import (
+	"encoding/hex"
 	"encoding/json"
-
-	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/common"
+	"strings"
 )
+
+// Address represents a 20-byte Ethereum address
+type Address [20]byte
+
+// String returns the hex string representation of the address
+func (a Address) String() string {
+	return "0x" + hex.EncodeToString(a[:])
+}
+
+// Hash represents a 32-byte hash
+type Hash [32]byte
+
+// String returns the hex string representation of the hash
+func (h Hash) String() string {
+	return "0x" + hex.EncodeToString(h[:])
+}
+
+// Bytes returns the hash as a byte slice
+func (h Hash) Bytes() []byte {
+	return h[:]
+}
+
+// HexData represents hex-encoded byte data with convenient access methods
+type HexData string
+
+// Hex returns the hex string representation
+func (h HexData) Hex() string {
+	return string(h)
+}
+
+// Bytes returns the decoded bytes from the hex string
+// Panics if the hex string is invalid (should not happen in generated code)
+func (h HexData) Bytes() []byte {
+	hexStr := string(h)
+	if hexStr == "" {
+		return nil
+	}
+	
+	// Remove 0x prefix if present
+	if strings.HasPrefix(hexStr, "0x") {
+		hexStr = hexStr[2:]
+	}
+	
+	if hexStr == "" {
+		return nil
+	}
+	
+	data, err := hex.DecodeString(hexStr)
+	if err != nil {
+		panic("invalid hex string in generated code: " + string(h))
+	}
+	return data
+}
 
 // CompileConfig holds configuration for Solidity compilation
 type CompileConfig struct {
@@ -74,10 +126,9 @@ type Contract struct {
 	SourceFile       string
 	PackageName      string
 	SolcVersion      string
-	ABI              abi.ABI
 	ABIJson          string
-	Bytecode         string
-	DeployedBytecode string
+	Bytecode         HexData
+	DeployedBytecode HexData
 	Methods          []Method
 	Events           []Event
 	Errors           []ContractError
@@ -88,8 +139,7 @@ type Contract struct {
 type Method struct {
 	Name         string
 	Signature    string
-	Selector     string
-	ABI          abi.Method
+	Selector     HexData
 	Inputs       []Parameter
 	Outputs      []Parameter
 	InputStruct  *Struct
@@ -99,8 +149,7 @@ type Method struct {
 // Event represents a contract event
 type Event struct {
 	Name    string
-	Topic   common.Hash
-	ABI     abi.Event
+	Topic   Hash
 	Inputs  []Parameter
 	Struct  *Struct
 }
@@ -109,8 +158,7 @@ type Event struct {
 type ContractError struct {
 	Name      string
 	Signature string
-	Selector  string
-	ABI       abi.Error
+	Selector  HexData
 	Inputs    []Parameter
 	Struct    *Struct
 }
@@ -127,7 +175,6 @@ type Constructor struct {
 type Parameter struct {
 	Name    string
 	Type    GoType
-	ABIType abi.Type
 	Indexed bool // for events
 }
 
@@ -168,14 +215,16 @@ type CombinedContract struct {
 	UserDoc    interface{}       `json:"userdoc,omitempty"`
 }
 
+
+
 // Common Go types
 var (
 	GoTypeBool         = GoType{TypeName: "bool"}
 	GoTypeString       = GoType{TypeName: "string"}
 	GoTypeBytes        = GoType{TypeName: "[]byte"}
 	GoTypeBigInt       = GoType{Import: "math/big", TypeName: "*big.Int", IsPtr: true}
-	GoTypeAddress      = GoType{Import: "github.com/ethereum/go-ethereum/common", TypeName: "common.Address"}
-	GoTypeHash         = GoType{Import: "github.com/ethereum/go-ethereum/common", TypeName: "common.Hash"}
+	GoTypeAddress      = GoType{TypeName: "Address"}
+	GoTypeHash         = GoType{TypeName: "Hash"}
 	GoTypeUint8        = GoType{TypeName: "uint8"}
 	GoTypeUint16       = GoType{TypeName: "uint16"}
 	GoTypeUint32       = GoType{TypeName: "uint32"}

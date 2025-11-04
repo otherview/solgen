@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-package main
+package test
 
 import (
 	"flag"
@@ -18,46 +18,48 @@ var updateGolden = flag.Bool("update-golden", false, "update golden files")
 func TestGolden_SimpleContract(t *testing.T) {
 	// Simple contract for golden file testing
 	input := `{
-		"SimpleContract.sol:SimpleContract": {
-			"abi": [
-				{
-					"type": "constructor",
-					"inputs": [{"name": "initialValue", "type": "uint256"}]
-				},
-				{
-					"type": "function", 
-					"name": "getValue",
-					"inputs": [],
-					"outputs": [{"name": "", "type": "uint256"}],
-					"stateMutability": "view"
-				},
-				{
-					"type": "function",
-					"name": "setValue", 
-					"inputs": [{"name": "newValue", "type": "uint256"}],
-					"outputs": [],
-					"stateMutability": "nonpayable"
-				},
-				{
-					"type": "event",
-					"name": "ValueChanged",
-					"inputs": [
-						{"name": "oldValue", "type": "uint256", "indexed": false},
-						{"name": "newValue", "type": "uint256", "indexed": false}
-					]
-				},
-				{
-					"type": "error",
-					"name": "InvalidValue", 
-					"inputs": [{"name": "provided", "type": "uint256"}]
+		"contracts": {
+			"SimpleContract.sol:SimpleContract": {
+				"abi": [
+					{
+						"type": "constructor",
+						"inputs": [{"name": "initialValue", "type": "uint256"}]
+					},
+					{
+						"type": "function", 
+						"name": "getValue",
+						"inputs": [],
+						"outputs": [{"name": "", "type": "uint256"}],
+						"stateMutability": "view"
+					},
+					{
+						"type": "function",
+						"name": "setValue", 
+						"inputs": [{"name": "newValue", "type": "uint256"}],
+						"outputs": [],
+						"stateMutability": "nonpayable"
+					},
+					{
+						"type": "event",
+						"name": "ValueChanged",
+						"inputs": [
+							{"name": "oldValue", "type": "uint256", "indexed": false},
+							{"name": "newValue", "type": "uint256", "indexed": false}
+						]
+					},
+					{
+						"type": "error",
+						"name": "InvalidValue", 
+						"inputs": [{"name": "provided", "type": "uint256"}]
+					}
+				],
+				"bin": "0x608060405234801561001057600080fd5b5060405161012c38038061012c833981810160405281019061003291906100a4565b80600081905550506100d1565b600080fd5b6000819050919050565b61005a81610047565b811461006557600080fd5b50565b60008151905061007781610051565b92915050565b6000602082840312156100935761009261004257600080fd5b5b60006100a184828501610068565b91505092915050565b604c806100e06000396000f3fe608060405200",
+				"bin-runtime": "0x6080604052348015600f57600080fd5b506004361060325760003560e01c806320965255146037578063552410771460005b600080fd5b60005460405190815260200160405180910390f35b6000819055565b600080fd5b6000819050919050565b605c81604f565b8114606657600080fd5b50565b600081359050607a81605556565b92915050565b600060208284031215609357609260004a565b5b6000609f84828501606d565b9150509291505056fea2646970667358221220",
+				"metadata": "{\"compiler\":{\"version\":\"0.8.20+commit.a1b79de6\"},\"language\":\"Solidity\",\"output\":{\"abi\":[],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"version\":1}},\"settings\":{\"compilationTarget\":{\"SimpleContract.sol\":\"SimpleContract\"},\"evmVersion\":\"london\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":true,\"runs\":200},\"remappings\":[]},\"sources\":{\"SimpleContract.sol\":{\"keccak256\":\"0x\",\"urls\":[\"bzz-raw://\",\"dweb:/ipfs/\"]}},\"version\":1}",
+				"hashes": {
+					"getValue()": "20965255",
+					"setValue(uint256)": "55241077"
 				}
-			],
-			"bin": "0x608060405234801561001057600080fd5b5060405161012c38038061012c833981810160405281019061003291906100a4565b80600081905550506100d1565b600080fd5b6000819050919050565b61005a81610047565b811461006557600080fd5b50565b60008151905061007781610051565b92915050565b6000602082840312156100935761009261004257600080fd5b5b60006100a184828501610068565b91505092915050565b604c806100e06000396000f3fe608060405200",
-			"bin-runtime": "0x6080604052348015600f57600080fd5b506004361060325760003560e01c806320965255146037578063552410771460005b600080fd5b60005460405190815260200160405180910390f35b6000819055565b600080fd5b6000819050919050565b605c81604f565b8114606657600080fd5b50565b600081359050607a81605556565b92915050565b600060208284031215609357609260004a565b5b6000609f84828501606d565b9150509291505056fea2646970667358221220",
-			"metadata": "{\"compiler\":{\"version\":\"0.8.20+commit.a1b79de6\"},\"language\":\"Solidity\",\"output\":{\"abi\":[],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"version\":1}},\"settings\":{\"compilationTarget\":{\"SimpleContract.sol\":\"SimpleContract\"},\"evmVersion\":\"london\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":true,\"runs\":200},\"remappings\":[]},\"sources\":{\"SimpleContract.sol\":{\"keccak256\":\"0x\",\"urls\":[\"bzz-raw://\",\"dweb:/ipfs/\"]}},\"version\":1}",
-			"hashes": {
-				"getValue()": "20965255",
-				"setValue(uint256)": "55241077"
 			}
 		}
 	}`
@@ -68,7 +70,8 @@ func TestGolden_SimpleContract(t *testing.T) {
 func TestGolden_ComplexContract(t *testing.T) {
 	// More complex contract with multiple types
 	input := `{
-		"ComplexContract.sol:ComplexContract": {
+		"contracts": {
+			"ComplexContract.sol:ComplexContract": {
 			"abi": [
 				{
 					"type": "function",
@@ -118,7 +121,8 @@ func TestGolden_ComplexContract(t *testing.T) {
 				"getMapping(bytes32)": "45678901"
 			}
 		}
-	}`
+	}
+}`
 
 	testGoldenFile(t, "complex_contract", input)
 }
@@ -126,7 +130,8 @@ func TestGolden_ComplexContract(t *testing.T) {
 func TestGolden_MultipleContracts(t *testing.T) {
 	// Test with multiple contracts in same file
 	input := `{
-		"MultiContract.sol:ContractA": {
+		"contracts": {
+			"MultiContract.sol:ContractA": {
 			"abi": [
 				{
 					"type": "function",
@@ -156,7 +161,8 @@ func TestGolden_MultipleContracts(t *testing.T) {
 			"metadata": "{}",
 			"hashes": {"functionB(string)": "bbbbbbbb"}
 		}
-	}`
+	}
+}`
 
 	testGoldenFile(t, "multi_contract", input)
 }
@@ -169,9 +175,17 @@ func testGoldenFile(t *testing.T, testName, input string) {
 		t.Fatalf("processCombinedJSON failed: %v", err)
 	}
 
+	// Prepare test/out/golden directory (relative to project root)
+	outputDir := filepath.Join("..", "test", "out", "golden", testName)
+	if err := os.RemoveAll(outputDir); err != nil {
+		t.Fatalf("failed to clean output directory: %v", err)
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatalf("failed to create output directory: %v", err)
+	}
+
 	// Generate Go code for each contract
-	tempDir := t.TempDir()
-	generator := gen.NewGenerator(tempDir)
+	generator := gen.NewGenerator(outputDir)
 	
 	if err := generator.Generate(contracts); err != nil {
 		t.Fatalf("code generation failed: %v", err)
@@ -179,7 +193,7 @@ func testGoldenFile(t *testing.T, testName, input string) {
 
 	// For each generated contract, compare with golden file
 	for _, contract := range contracts {
-		packageDir := filepath.Join(tempDir, contract.PackageName)
+		packageDir := filepath.Join(outputDir, contract.PackageName)
 		generatedFile := filepath.Join(packageDir, contract.PackageName+".go")
 
 		// Read generated content
@@ -191,8 +205,8 @@ func testGoldenFile(t *testing.T, testName, input string) {
 		// Normalize line endings and whitespace
 		generated := normalizeContent(string(generatedContent))
 
-		// Golden file path
-		goldenFile := filepath.Join("testdata", "golden", testName+"_"+contract.PackageName, contract.PackageName+".go")
+		// Golden file path (relative to project root)
+		goldenFile := filepath.Join("..", "test", "data", "golden", testName+"_"+contract.PackageName, contract.PackageName+".go")
 
 		if *updateGolden {
 			// Create golden directory
@@ -291,7 +305,8 @@ func TestGolden_CompileGenerated(t *testing.T) {
 
 	// Use simple contract for compilation test
 	input := `{
-		"TestCompile.sol:TestCompile": {
+		"contracts": {
+			"TestCompile.sol:TestCompile": {
 			"abi": [
 				{
 					"type": "function",
@@ -306,22 +321,31 @@ func TestGolden_CompileGenerated(t *testing.T) {
 			"metadata": "{}",
 			"hashes": {"test()": "12345678"}
 		}
-	}`
+	}
+}`
 
 	contracts, err := processCombinedJSON([]byte(input))
 	if err != nil {
 		t.Fatalf("processCombinedJSON failed: %v", err)
 	}
 
-	tempDir := t.TempDir()
-	generator := gen.NewGenerator(tempDir)
+	// Prepare test/out/compile directory (relative to project root)
+	outputDir := "../test/out/compile"
+	if err := os.RemoveAll(outputDir); err != nil {
+		t.Fatalf("failed to clean output directory: %v", err)
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatalf("failed to create output directory: %v", err)
+	}
+
+	generator := gen.NewGenerator(outputDir)
 	
 	if err := generator.Generate(contracts); err != nil {
 		t.Fatalf("code generation failed: %v", err)
 	}
 
 	// Test that generated code compiles
-	if err := testGeneratedCode(t, tempDir); err != nil {
+	if err := testGeneratedCode(t, outputDir); err != nil {
 		t.Errorf("generated code compilation failed: %v", err)
 	}
 }

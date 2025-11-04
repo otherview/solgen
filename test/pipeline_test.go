@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-package main
+package test
 
 import (
 	"encoding/json"

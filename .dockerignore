@@ -6,6 +6,7 @@ solgen
 *_test.go
 testdata/
 integration_test.go
+test/
 
 # Ignore documentation (not needed in container)
 README.md
