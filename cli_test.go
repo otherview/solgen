@@ -13,6 +13,7 @@ import (
 )
 
 func TestCLI_ProcessJSON(t *testing.T) {
+	// Do not call t.Parallel() here since we modify global variables
 	// Create temporary output directory
 	tempDir := t.TempDir()
 	outputDir := filepath.Join(tempDir, "generated")
@@ -169,8 +170,11 @@ func TestCLI_ValidationErrors(t *testing.T) {
 		},
 	}
 
+	// Run subtests sequentially to avoid race conditions on global variables
 	for _, tt := range tests {
+		tt := tt // capture loop variable
 		t.Run(tt.name, func(t *testing.T) {
+			// Do not call t.Parallel() here since we modify global variables
 			tempDir := t.TempDir()
 			
 			// Replace the output path with a temp dir for valid path tests
@@ -184,44 +188,7 @@ func TestCLI_ValidationErrors(t *testing.T) {
 				}
 			}
 
-			// Save and restore original values
-			origArgs := os.Args
-			origStdin := os.Stdin
-			defer func() { 
-				os.Args = origArgs
-				os.Stdin = origStdin
-			}()
-
-			os.Args = args
-
-			// Create pipe for input
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatalf("failed to create pipe: %v", err)
-			}
-			defer r.Close()
-
-			os.Stdin = r
-
-			// Write input
-			go func() {
-				defer w.Close()
-				w.Write([]byte(tt.input))
-			}()
-
-			// Capture stderr
-			origStderr := os.Stderr
-			defer func() { os.Stderr = origStderr }()
-
-			rErr, wErr, err := os.Pipe()
-			if err != nil {
-				t.Fatalf("failed to create error pipe: %v", err)
-			}
-			defer rErr.Close()
-
-			os.Stderr = wErr
-
-			// For error cases, just test the individual functions that would fail
+			// For error cases, test the individual functions directly instead of modifying globals
 			switch tt.name {
 			case "invalid output directory":
 				// Test invalid output directory
@@ -237,8 +204,6 @@ func TestCLI_ValidationErrors(t *testing.T) {
 					t.Errorf("expected error for %s", tt.name)
 				}
 			}
-
-			wErr.Close()
 		})
 	}
 }
