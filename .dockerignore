@@ -1,0 +1,31 @@
+# Ignore build artifacts
+solgen
+*.exe
+
+# Ignore test and development files
+*_test.go
+testdata/
+integration_test.go
+
+# Ignore documentation (not needed in container)
+README.md
+LICENSE
+
+# Ignore git files
+.git/
+.gitignore
+
+# Ignore IDE files
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+
+# Ignore temporary files
+*.tmp
+*.log
+
+# Keep go.mod and go.sum (needed for build)
+!go.mod
+!go.sum
