@@ -4,17 +4,90 @@
 [![Release](https://github.com/otherview/solgen/workflows/Release/badge.svg)](https://github.com/otherview/solgen/actions/workflows/release.yml)
 [![Edge Build](https://github.com/otherview/solgen/workflows/Edge%20Build/badge.svg)](https://github.com/otherview/solgen/actions/workflows/edge.yml)
 
-Lightning-fast Go bindings generator for Solidity contracts. Zero dependencies, maximum simplicity.
+Lightning-fast Go bindings generator for Solidity contracts. **Zero dependencies, maximum simplicity.**
+
+Generate clean, type-safe Go code from Solidity contracts in seconds. No external dependencies in generated bindings - just pure Go ready for production.
 
 ## ✨ Features
 
-- 🔄 **Pipeline-first**: Reads `solc` output, writes clean Go packages
-- 🚀 **Zero blockchain deps**: Pure Go, no external libraries
-- 📦 **One package per contract**: Clean, isolated bindings
-- 🎯 **Simple API**: Contract metadata + utility functions
-- 🔧 **Method overloads**: Smart naming for overloaded functions
-- ⚠️ **Custom errors**: Full Solidity error support
-- 📡 **Events**: Complete event type definitions
+- 🚀 **Zero Dependencies**: Generated bindings are completely self-contained
+- 🎯 **Type-Safe API**: Clean chaining API with compile-time safety
+- 📦 **One Package per Contract**: Isolated, clean Go packages
+- ⚡ **Production Ready**: Built-in ABI encoding/decoding, no external libs
+- 🔧 **Method Overloads**: Smart naming for overloaded functions  
+- ⚠️ **Custom Errors**: Full Solidity error support with type-safe decoding
+- 📊 **Event Logs**: Complete event parsing with structured data
+- 🔄 **Pipeline-First**: Reads `solc` output, writes clean Go code
+
+## 💻 Usage Examples
+
+Clean, type-safe bindings that work with any Ethereum client:
+
+### ✨ Basic Usage
+```go
+import "yourproject/generated/simpletoken"
+
+// Pack method calls for transactions
+transferData := simpletoken.Methods().TransferMethod().Pack(recipient, amount)
+approveData := simpletoken.Methods().ApproveMethod().MustPack(spender, amount)
+
+// Decode return values from eth_call  
+balance := simpletoken.Methods().BalanceOfMethod().MustDecode(returnData)
+success := simpletoken.Methods().TransferMethod().MustDecode(returnData)
+tokenName := simpletoken.Methods().NameMethod().MustDecode(returnData)
+```
+
+### 📊 Event & Error Handling
+```go
+// Decode event logs
+transferEvent := simpletoken.Events().TransferEvent().MustDecode(logData)
+fmt.Printf("Transfer: %s to %s, amount: %s ETH\n", 
+    transferEvent.From, transferEvent.To, weiToEth(transferEvent.Value))
+
+// Handle custom errors from reverted transactions  
+if revertData != nil {
+    error := simpletoken.Errors().InsufficientBalanceError().MustDecode(revertData)
+    fmt.Printf("Error: insufficient balance - requested %s, available %s\n",
+        weiToEth(error.Requested), weiToEth(error.Available))
+}
+```
+
+### 🌐 Blockchain Integration
+```go
+import "github.com/ethereum/go-ethereum/ethclient"
+
+// Works seamlessly with ethclient or any Ethereum library
+client, _ := ethclient.Dial("https://mainnet.infura.io/v3/YOUR_PROJECT_ID")
+contractAddr := common.HexToAddress("0x...")
+
+// Read contract state
+callData := simpletoken.Methods().BalanceOfMethod().MustPack(userAddress)
+result, _ := client.CallContract(ctx, ethereum.CallMsg{
+    To: &contractAddr, Data: callData.Bytes(),
+}, nil)
+balance := simpletoken.Methods().BalanceOfMethod().MustDecode(result)
+
+// Send transactions  
+tx := types.NewTransaction(nonce, contractAddr, big.NewInt(0), gasLimit, gasPrice, 
+    simpletoken.Methods().TransferMethod().MustPack(recipient, amount).Bytes())
+```
+
+### 🔗 Zero Dependencies
+Generated bindings are completely self-contained:
+```go
+// No external imports needed in generated code!
+type Address [20]byte  // Custom address type
+type Hash [32]byte     // Custom hash type  
+type HexData string    // Convenient hex handling
+
+// Built-in ABI encoding/decoding
+// Type-safe method calls
+// Clean error handling
+```
+
+> 🚀 **[Complete Example](examples/simpletoken/)** - See the full working example with detailed comments showing all features in action!
+
+
 
 ## 🚀 Quick Start
 
@@ -27,8 +100,6 @@ go install github.com/otherview/solgen/cmd/solgen@latest
 ```
 
 > ⚠️ **Docker Image Update**: The official Solidity compiler Docker image has moved from `ethereum/solc` (deprecated) to `ghcr.io/argotorg/solc`. All examples below use the new official image.
-
-## 💡 Usage
 
 ### ⚡ One-liner magic
 ```bash
@@ -92,51 +163,6 @@ generated/
     mycontract.go    # Clean, dependency-free bindings
 ```
 
-### 🎯 Simple API
-
-```go
-package mycontract
-
-// Contract metadata
-func ABI() string                 // Contract ABI JSON
-func HexBytecode() string         // Creation bytecode
-func HexDeployedBytecode() string // Runtime bytecode
-
-// Method info
-func TransferMethod() MethodInfo {
-  return MethodInfo{
-    Name:      "transfer",
-    Signature: "transfer(address,uint256)",
-    Selector:  "0xa9059cbb",
-  }
-}
-
-// Event info  
-func GetTransferEvent() EventInfo {
-  return EventInfo{
-    Name:  "Transfer", 
-    Topic: common.HexToHash("0xddf252ad..."),
-  }
-}
-
-// Registry access
-methods := Methods()  // MethodRegistry{Transfer: MethodInfo{...}}
-events := Events()    // EventRegistry{Transfer: EventInfo{...}}
-errors := Errors()    // ErrorRegistry{InsufficientBalance: ErrorInfo{...}}
-
-// Type definitions
-type TransferEvent struct {
-  From  common.Address `json:"from"`
-  To    common.Address `json:"to"`
-  Value *big.Int       `json:"value"`
-}
-
-// Utility functions
-data, err := HexToBytes("0x1234")    // Parse hex
-hex := BytesToHex(data)              // Format hex
-data = MustHexToBytes("0x1234")      // Parse hex (panic on error)
-```
-
 ### 🔄 Type Mapping
 
 | Solidity | Go | Example |
@@ -149,7 +175,7 @@ data = MustHexToBytes("0x1234")      // Parse hex (panic on error)
 | `uint256` | `*big.Int` | `big.NewInt(123)` |
 | `uint64` | `uint64` | `uint64(123)` |
 | `int256` | `*big.Int` | `big.NewInt(-123)` |
-| `T[]` | `[]T` | `[]common.Address{...}` |
+| `T[]` | `[]T` | `[]Address{...}` |
 | `T[N]` | `[N]T` | `[3]uint256{...}` |
 
 ## 📋 Requirements
