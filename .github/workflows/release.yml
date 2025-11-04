@@ -63,10 +63,7 @@ jobs:
         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         tags: |
           type=ref,event=tag
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=semver,pattern={{major}}
-          type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=latest
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
@@ -104,3 +101,12 @@ jobs:
           dist/solgen-darwin-arm64
           dist/solgen-windows-amd64.exe
           dist/checksums.txt
+
+    - name: Update Docker Hub Description
+      uses: peter-evans/dockerhub-description@v5
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        repository: otherview/solgen
+        short-description: "Lightning-fast Go bindings generator for Solidity contracts. Zero dependencies, maximum simplicity."
+        readme-filepath: ./README.md
