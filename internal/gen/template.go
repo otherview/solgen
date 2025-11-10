@@ -829,6 +829,17 @@ type {{.Struct.Name}} struct {
 }
 {{- end}}
 
+{{/* Generate standalone structs */}}
+{{- range .Contract.Structs}}
+
+// {{.Name}} represents a Solidity struct
+type {{.Name}} struct {
+{{- range .Fields}}
+	{{.Name}} {{formatGoType .Type}} ` + "`" + `json:"{{.JSONTag}}"` + "`" + `
+{{- end}}
+}
+{{- end}}
+
 {{/* Generate input/output structs for methods */}}
 {{- range .Contract.Methods}}
 {{- if .InputStruct}}
@@ -970,6 +981,22 @@ func (m *{{.Name | title}}Method) MustDecode(data []byte) {{if eq (len .Outputs)
 		result[i] = elem.(Address)
 	}
 	return result
+	{{- else if and $output.Type.IsSlice (ne $output.Type.TypeName "[]*big.Int") (ne $output.Type.TypeName "[]uint64") (ne $output.Type.TypeName "[]Address")}}
+	// Custom struct array type: {{$output.Type.TypeName}}
+	if len(data) < 32 {
+		panic("insufficient data for array length")
+	}
+	lengthBig := mustDecodeUint256(data[0:32])
+	if !lengthBig.IsUint64() {
+		panic("array length too large")
+	}
+	length := int(lengthBig.Uint64())
+	
+	// TODO: Implement proper struct decoding based on struct fields
+	// For now, return empty array to avoid panic
+	elemType := "{{$output.Type.TypeName}}"[2:] // Remove "[]" prefix to get struct name
+	_ = elemType // Use elemType to generate proper struct decoding
+	panic("struct array decoding requires struct field information for {{$output.Type.TypeName}}")
 	{{- else}}
 	// Unsupported return type: {{$output.Type.TypeName}}
 	panic("unsupported return type: {{$output.Type.TypeName}}")
