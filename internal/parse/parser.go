@@ -68,6 +68,10 @@ func (r *structRegistry) getAllStructs() []types.Struct {
 	for _, s := range r.structs {
 		structs = append(structs, s)
 	}
+	// Sort structs for deterministic output
+	sort.Slice(structs, func(i, j int) bool {
+		return structs[i].Name < structs[j].Name
+	})
 	return structs
 }
 
@@ -226,6 +230,14 @@ func parseMethodsWithRegistry(parsedABI abi.ABI, methodIds map[string]string, re
 			OutputStruct: outputStruct,
 		})
 	}
+
+	// Sort methods for deterministic output
+	sort.Slice(methods, func(i, j int) bool {
+		if methods[i].Name != methods[j].Name {
+			return methods[i].Name < methods[j].Name
+		}
+		return methods[i].Signature < methods[j].Signature
+	})
 
 	return methods, nil
 }
