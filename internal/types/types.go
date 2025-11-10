@@ -133,6 +133,7 @@ type Contract struct {
 	Events           []Event
 	Errors           []ContractError
 	Constructor      *Constructor
+	Structs          []Struct // Standalone struct definitions
 }
 
 // Method represents a contract method
