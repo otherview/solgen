@@ -730,17 +730,6 @@ type EventRegistry struct{}
 // Error registry provides access to packable contract errors
 type ErrorRegistry struct{}
 
-// GetValueMethod returns a packable method for getValue
-func (mr MethodRegistry) GetValueMethod() *GetValueMethod {
-	return &GetValueMethod{
-		PackableMethod: PackableMethod{
-			Name:      "getValue",
-			Signature: "getValue()",
-			Selector:  HexData("0x20965255"),
-		},
-	}
-}
-
 // SetValueMethod returns a packable method for setValue
 func (mr MethodRegistry) SetValueMethod() *SetValueMethod {
 	return &SetValueMethod{
@@ -748,6 +737,17 @@ func (mr MethodRegistry) SetValueMethod() *SetValueMethod {
 			Name:      "setValue",
 			Signature: "setValue(uint256)",
 			Selector:  HexData("0x55241077"),
+		},
+	}
+}
+
+// GetValueMethod returns a packable method for getValue
+func (mr MethodRegistry) GetValueMethod() *GetValueMethod {
+	return &GetValueMethod{
+		PackableMethod: PackableMethod{
+			Name:      "getValue",
+			Signature: "getValue()",
+			Selector:  HexData("0x20965255"),
 		},
 	}
 }
@@ -799,13 +799,13 @@ type InvalidValueError struct {
 	Provided *big.Int `json:"provided"`
 }
 
-// GetValueMethod represents the getValue method with type-safe decode functionality
-type GetValueMethod struct {
+// SetValueMethod represents the setValue method with type-safe decode functionality
+type SetValueMethod struct {
 	PackableMethod
 }
 
-// SetValueMethod represents the setValue method with type-safe decode functionality
-type SetValueMethod struct {
+// GetValueMethod represents the getValue method with type-safe decode functionality
+type GetValueMethod struct {
 	PackableMethod
 }
 
