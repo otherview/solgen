@@ -559,7 +559,13 @@ func mapSolidityToGoType(abiType abi.Type) (types.GoType, error) {
 		if abiType.Size <= 64 {
 			return mapIntType(abiType.Size), nil
 		}
-		return types.GoTypeBigInt, nil
+		// int256 - signed big integer
+		return types.GoType{
+			Import:   "math/big",
+			TypeName: "*big.Int",
+			IsPtr:    true,
+			IsSigned: true,
+		}, nil
 
 	case abi.FixedBytesTy:
 		return types.GoType{

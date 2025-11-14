@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"text/template"
 
@@ -79,7 +78,7 @@ func (g *Generator) generateContractPackage(contract *types.Contract) error {
 
 // renderContract renders the Go code for a contract using templates
 func (g *Generator) renderContract(contract *types.Contract) (string, error) {
-	tmpl, err := template.New("contract").Funcs(g.templateFuncs()).Parse(contractTemplate)
+	tmpl, err := template.New("contract").Funcs(templateFuncs()).Parse(contractTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parsing template: %w", err)
 	}
@@ -166,36 +165,4 @@ func (g *Generator) calculateImports(contract *types.Contract) []string {
 	
 	sort.Strings(imports)
 	return imports
-}
-
-// templateFuncs returns template helper functions
-func (g *Generator) templateFuncs() template.FuncMap {
-	return template.FuncMap{
-		"formatGoType": g.formatGoType,
-		"quote":        strconv.Quote,
-		"lower":        strings.ToLower,
-		"title":        g.titleCase,
-		"join":         strings.Join,
-		"add":          func(a, b int) int { return a + b },
-		"default":      func(def, val string) string { if val == "" { return def }; return val },
-	}
-}
-
-// formatGoType formats a GoType for use in generated code
-func (g *Generator) formatGoType(goType types.GoType) string {
-	return goType.TypeName
-}
-
-// titleCase provides a simple title case conversion
-func (g *Generator) titleCase(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-// TemplateData holds data for template rendering
-type TemplateData struct {
-	Contract *types.Contract
-	Imports  []string
 }
