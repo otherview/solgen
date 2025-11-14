@@ -194,10 +194,11 @@ type StructField struct {
 
 // GoType represents a Go type mapping
 type GoType struct {
-	Import   string // import path if needed
-	TypeName string // Go type name
-	IsSlice  bool   // for dynamic arrays
-	IsPtr    bool   // for big.Int
+	Import     string // import path if needed
+	TypeName   string // Go type name
+	IsSlice    bool   // for dynamic arrays
+	IsPtr      bool   // for big.Int
+	IsSigned   bool   // for distinguishing int256 vs uint256 when both map to *big.Int
 }
 
 // CombinedJSON represents the structure of solc --combined-json output
