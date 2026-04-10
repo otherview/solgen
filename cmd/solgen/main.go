@@ -44,7 +44,9 @@ func rootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flags.Output, "out", "", "Output directory for generated Go packages")
 	cmd.Flags().BoolVarP(&flags.Verbose, "verbose", "v", false, "Verbose output")
 
-	cmd.MarkFlagRequired("out")
+	if err := cmd.MarkFlagRequired("out"); err != nil {
+		panic(err) // "out" flag is always registered above; this can never fire
+	}
 
 	return cmd
 }

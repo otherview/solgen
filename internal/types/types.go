@@ -46,10 +46,8 @@ func (h HexData) Bytes() []byte {
 	}
 	
 	// Remove 0x prefix if present
-	if strings.HasPrefix(hexStr, "0x") {
-		hexStr = hexStr[2:]
-	}
-	
+	hexStr = strings.TrimPrefix(hexStr, "0x")
+
 	if hexStr == "" {
 		return nil
 	}
