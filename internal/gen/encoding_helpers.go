@@ -38,30 +38,29 @@ func encodeUint256(val interface{}) ([]byte, error) {
 	}
 }
 
-// encodeInt256 encodes a signed 256-bit integer to 32 bytes using two's complement
+// encodeInt256 encodes a signed 256-bit integer to 32 bytes using two's complement.
+// Valid range: [-2^255, 2^255-1].
 func encodeInt256(val interface{}) ([]byte, error) {
 	result := make([]byte, 32)
 	switch v := val.(type) {
 	case *big.Int:
-		// Check if value fits in 256 bits (considering sign)
-		if v.BitLen() >= 256 {
-			return nil, errors.New("value too large for int256")
-		}
-		
 		if v.Sign() >= 0 {
-			// Positive number - same as uint256
+			// Positive: valid range [0, 2^255-1] → BitLen must be ≤ 255.
+			if v.BitLen() > 255 {
+				return nil, errors.New("value too large for int256")
+			}
 			v.FillBytes(result)
 		} else {
-			// Negative number - use two's complement
-			// Create a 256-bit mask (all 1s)
-			mask := new(big.Int).Lsh(big.NewInt(1), 256)
-			mask.Sub(mask, big.NewInt(1))
-			
-			// Get absolute value, subtract 1, XOR with mask
+			// Negative: valid range [-2^255, -1].
+			// abs(-2^255) has BitLen == 256, which is the boundary.
 			abs := new(big.Int).Neg(v)
-			abs.Sub(abs, big.NewInt(1))
-			abs.Xor(abs, mask)
-			abs.FillBytes(result)
+			minNeg := new(big.Int).Lsh(big.NewInt(1), 255) // 2^255
+			if abs.Cmp(minNeg) > 0 {
+				return nil, errors.New("value too small for int256")
+			}
+			// Two's-complement: compute 2^256 + v = 2^256 - abs(v).
+			mask := new(big.Int).Lsh(big.NewInt(1), 256)
+			new(big.Int).Add(mask, v).FillBytes(result)
 		}
 		return result, nil
 	case int64:

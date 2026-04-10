@@ -58,12 +58,15 @@ func runProcessJSON(flags *ProcessFlags) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Read combined JSON from stdin
-	jsonData, err := io.ReadAll(os.Stdin)
+	// Read combined JSON from stdin (cap at 100 MB to avoid OOM on malformed input).
+	const maxInputBytes = 100 * 1024 * 1024
+	jsonData, err := io.ReadAll(io.LimitReader(os.Stdin, maxInputBytes+1))
 	if err != nil {
 		return fmt.Errorf("reading from stdin: %w", err)
 	}
-
+	if len(jsonData) > maxInputBytes {
+		return fmt.Errorf("input exceeds 100 MB limit")
+	}
 	if len(jsonData) == 0 {
 		return fmt.Errorf("no JSON data provided on stdin")
 	}

@@ -132,10 +132,30 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 	}
 	return decodeHash(data[offset:offset+32])
 	{{- else if eq $output.Type.TypeName "string"}}
-	result, _, err := decodeString(data, offset)
+	if len(data) < offset+32 {
+		return "", errors.New("insufficient data for offset pointer")
+	}
+	ptrBig, err := decodeUint256(data[offset : offset+32])
+	if err != nil {
+		return "", fmt.Errorf("decoding offset pointer: %w", err)
+	}
+	if !ptrBig.IsUint64() {
+		return "", errors.New("offset pointer too large")
+	}
+	result, _, err := decodeString(data, int(ptrBig.Uint64()))
 	return result, err
 	{{- else if eq $output.Type.TypeName "[]byte"}}
-	result, _, err := decodeBytes(data, offset)
+	if len(data) < offset+32 {
+		return nil, errors.New("insufficient data for offset pointer")
+	}
+	ptrBig, err := decodeUint256(data[offset : offset+32])
+	if err != nil {
+		return nil, fmt.Errorf("decoding offset pointer: %w", err)
+	}
+	if !ptrBig.IsUint64() {
+		return nil, errors.New("offset pointer too large")
+	}
+	result, _, err := decodeBytes(data, int(ptrBig.Uint64()))
 	return result, err
 	{{- else if eq $output.Type.TypeName "[1]byte"}}
 	if len(data) < offset+32 {
@@ -148,10 +168,17 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 	}
 	return decodeBytes32(data[offset:offset+32])
 	{{- else if eq $output.Type.TypeName "[]*big.Int"}}
-	// Handle []*big.Int array
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, offset, decodeUint256ArrayElement)
+	if len(data) < offset+32 {
+		return nil, errors.New("insufficient data for offset pointer")
+	}
+	ptrBig, err := decodeUint256(data[offset : offset+32])
+	if err != nil {
+		return nil, fmt.Errorf("decoding offset pointer: %w", err)
+	}
+	if !ptrBig.IsUint64() {
+		return nil, errors.New("offset pointer too large")
+	}
+	elems, _, err := decodeArray(data, int(ptrBig.Uint64()), decodeUint256ArrayElement)
 	if err != nil {
 		return nil, err
 	}
@@ -161,10 +188,17 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 	}
 	return result, nil
 	{{- else if eq $output.Type.TypeName "[]uint64"}}
-	// Handle []uint64 array
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, offset, func(d []byte) (interface{}, error) { return decodeUint64(d) })
+	if len(data) < offset+32 {
+		return nil, errors.New("insufficient data for offset pointer")
+	}
+	ptrBig, err := decodeUint256(data[offset : offset+32])
+	if err != nil {
+		return nil, fmt.Errorf("decoding offset pointer: %w", err)
+	}
+	if !ptrBig.IsUint64() {
+		return nil, errors.New("offset pointer too large")
+	}
+	elems, _, err := decodeArray(data, int(ptrBig.Uint64()), func(d []byte) (interface{}, error) { return decodeUint64(d) })
 	if err != nil {
 		return nil, err
 	}
@@ -174,10 +208,17 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 	}
 	return result, nil
 	{{- else if eq $output.Type.TypeName "[]Address"}}
-	// Handle []Address array
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, offset, decodeAddressArrayElement)
+	if len(data) < offset+32 {
+		return nil, errors.New("insufficient data for offset pointer")
+	}
+	ptrBig, err := decodeUint256(data[offset : offset+32])
+	if err != nil {
+		return nil, fmt.Errorf("decoding offset pointer: %w", err)
+	}
+	if !ptrBig.IsUint64() {
+		return nil, errors.New("offset pointer too large")
+	}
+	elems, _, err := decodeArray(data, int(ptrBig.Uint64()), decodeAddressArrayElement)
 	if err != nil {
 		return nil, err
 	}
@@ -187,10 +228,17 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 	}
 	return result, nil
 	{{- else if eq $output.Type.TypeName "[]bool"}}
-	// Handle []bool array
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, offset, decodeBoolArrayElement)
+	if len(data) < offset+32 {
+		return nil, errors.New("insufficient data for offset pointer")
+	}
+	ptrBig, err := decodeUint256(data[offset : offset+32])
+	if err != nil {
+		return nil, fmt.Errorf("decoding offset pointer: %w", err)
+	}
+	if !ptrBig.IsUint64() {
+		return nil, errors.New("offset pointer too large")
+	}
+	elems, _, err := decodeArray(data, int(ptrBig.Uint64()), decodeBoolArrayElement)
 	if err != nil {
 		return nil, err
 	}
@@ -262,32 +310,38 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 	{{- $needsVal := false}}
 	{{- $needsValAddr := false}}
 	{{- $needsValBool := false}}
+	{{- $needsValUint8 := false}}
+	{{- $needsValUint16 := false}}
+	{{- $needsValUint32 := false}}
 	{{- $needsValUint64 := false}}
+	{{- $needsValInt8 := false}}
+	{{- $needsValInt16 := false}}
+	{{- $needsValInt32 := false}}
 	{{- $needsValInt64 := false}}
+	{{- $needsValHash := false}}
+	{{- $needsValBytes1 := false}}
+	{{- $needsValBytes32 := false}}
 	{{- $needsValString := false}}
 	{{- $needsValBytes := false}}
+	{{- $needsNextOffset := false}}
 	{{- range .Outputs}}
-		{{- if eq .Type.TypeName "*big.Int"}}
-			{{- $needsVal = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "Address"}}
-			{{- $needsValAddr = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "bool"}}
-			{{- $needsValBool = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "uint64"}}
-			{{- $needsValUint64 = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "int64"}}
-			{{- $needsValInt64 = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "string"}}
-			{{- $needsValString = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "[]byte"}}
-			{{- $needsValBytes = true}}
-		{{- end}}
+		{{- if eq .Type.TypeName "*big.Int"}}{{- $needsVal = true}}{{- end}}
+		{{- if eq .Type.TypeName "Address"}}{{- $needsValAddr = true}}{{- end}}
+		{{- if eq .Type.TypeName "bool"}}{{- $needsValBool = true}}{{- end}}
+		{{- if eq .Type.TypeName "uint8"}}{{- $needsValUint8 = true}}{{- end}}
+		{{- if eq .Type.TypeName "uint16"}}{{- $needsValUint16 = true}}{{- end}}
+		{{- if eq .Type.TypeName "uint32"}}{{- $needsValUint32 = true}}{{- end}}
+		{{- if eq .Type.TypeName "uint64"}}{{- $needsValUint64 = true}}{{- end}}
+		{{- if eq .Type.TypeName "int8"}}{{- $needsValInt8 = true}}{{- end}}
+		{{- if eq .Type.TypeName "int16"}}{{- $needsValInt16 = true}}{{- end}}
+		{{- if eq .Type.TypeName "int32"}}{{- $needsValInt32 = true}}{{- end}}
+		{{- if eq .Type.TypeName "int64"}}{{- $needsValInt64 = true}}{{- end}}
+		{{- if eq .Type.TypeName "Hash"}}{{- $needsValHash = true}}{{- end}}
+		{{- if eq .Type.TypeName "[1]byte"}}{{- $needsValBytes1 = true}}{{- end}}
+		{{- if eq .Type.TypeName "[32]byte"}}{{- $needsValBytes32 = true}}{{- end}}
+		{{- if eq .Type.TypeName "string"}}{{- $needsValString = true}}{{- end}}
+		{{- if eq .Type.TypeName "[]byte"}}{{- $needsValBytes = true}}{{- end}}
+		{{- if .Type.IsStruct}}{{- $needsNextOffset = true}}{{- end}}
 	{{- end}}
 	{{- if $needsVal}}
 	var val *big.Int
@@ -298,17 +352,47 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 	{{- if $needsValBool}}
 	var valBool bool
 	{{- end}}
+	{{- if $needsValUint8}}
+	var valUint8 uint8
+	{{- end}}
+	{{- if $needsValUint16}}
+	var valUint16 uint16
+	{{- end}}
+	{{- if $needsValUint32}}
+	var valUint32 uint32
+	{{- end}}
 	{{- if $needsValUint64}}
 	var valUint64 uint64
 	{{- end}}
+	{{- if $needsValInt8}}
+	var valInt8 int8
+	{{- end}}
+	{{- if $needsValInt16}}
+	var valInt16 int16
+	{{- end}}
+	{{- if $needsValInt32}}
+	var valInt32 int32
+	{{- end}}
 	{{- if $needsValInt64}}
 	var valInt64 int64
+	{{- end}}
+	{{- if $needsValHash}}
+	var valHash Hash
+	{{- end}}
+	{{- if $needsValBytes1}}
+	var valBytes1 [1]byte
+	{{- end}}
+	{{- if $needsValBytes32}}
+	var valBytes32 [32]byte
 	{{- end}}
 	{{- if $needsValString}}
 	var valString string
 	{{- end}}
 	{{- if $needsValBytes}}
 	var valBytes []byte
+	{{- end}}
+	{{- if $needsNextOffset}}
+	var nextOffset int
 	{{- end}}
 	var err error
 	offset := 0
@@ -319,19 +403,44 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 	}
 	{{- if $output.Type.IsSigned}}
 	val, err = decodeInt256(data[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
-	}
-	result.{{$output.Name | title}} = val
-	offset += 32
 	{{- else}}
 	val, err = decodeUint256(data[offset:offset+32])
+	{{- end}}
 	if err != nil {
 		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
 	}
 	result.{{$output.Name | title}} = val
 	offset += 32
-	{{- end}}
+	{{- else if eq $output.Type.TypeName "uint8"}}
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value {{$i}}")
+	}
+	valUint8, err = decodeUint8(data[offset:offset+32])
+	if err != nil {
+		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	}
+	result.{{$output.Name | title}} = valUint8
+	offset += 32
+	{{- else if eq $output.Type.TypeName "uint16"}}
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value {{$i}}")
+	}
+	valUint16, err = decodeUint16(data[offset:offset+32])
+	if err != nil {
+		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	}
+	result.{{$output.Name | title}} = valUint16
+	offset += 32
+	{{- else if eq $output.Type.TypeName "uint32"}}
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value {{$i}}")
+	}
+	valUint32, err = decodeUint32(data[offset:offset+32])
+	if err != nil {
+		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	}
+	result.{{$output.Name | title}} = valUint32
+	offset += 32
 	{{- else if eq $output.Type.TypeName "uint64"}}
 	if len(data) < offset+32 {
 		return result, errors.New("insufficient data for return value {{$i}}")
@@ -341,6 +450,45 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
 	}
 	result.{{$output.Name | title}} = valUint64
+	offset += 32
+	{{- else if eq $output.Type.TypeName "int8"}}
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value {{$i}}")
+	}
+	{
+		raw, e := decodeInt64(data[offset:offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", e)
+		}
+		valInt8 = int8(raw)
+	}
+	result.{{$output.Name | title}} = valInt8
+	offset += 32
+	{{- else if eq $output.Type.TypeName "int16"}}
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value {{$i}}")
+	}
+	{
+		raw, e := decodeInt64(data[offset:offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", e)
+		}
+		valInt16 = int16(raw)
+	}
+	result.{{$output.Name | title}} = valInt16
+	offset += 32
+	{{- else if eq $output.Type.TypeName "int32"}}
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value {{$i}}")
+	}
+	{
+		raw, e := decodeInt64(data[offset:offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", e)
+		}
+		valInt32 = int32(raw)
+	}
+	result.{{$output.Name | title}} = valInt32
 	offset += 32
 	{{- else if eq $output.Type.TypeName "int64"}}
 	if len(data) < offset+32 {
@@ -372,129 +520,227 @@ func (m *{{.Name | title}}Method) decodeImpl(data []byte) ({{if eq (len .Outputs
 	}
 	result.{{$output.Name | title}} = valAddr
 	offset += 32
+	{{- else if eq $output.Type.TypeName "Hash"}}
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value {{$i}}")
+	}
+	valHash, err = decodeHash(data[offset:offset+32])
+	if err != nil {
+		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	}
+	result.{{$output.Name | title}} = valHash
+	offset += 32
+	{{- else if eq $output.Type.TypeName "[1]byte"}}
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value {{$i}}")
+	}
+	valBytes1, err = decodeBytes1(data[offset:offset+32])
+	if err != nil {
+		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	}
+	result.{{$output.Name | title}} = valBytes1
+	offset += 32
+	{{- else if eq $output.Type.TypeName "[32]byte"}}
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value {{$i}}")
+	}
+	valBytes32, err = decodeBytes32(data[offset:offset+32])
+	if err != nil {
+		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	}
+	result.{{$output.Name | title}} = valBytes32
+	offset += 32
 	{{- else if eq $output.Type.TypeName "[]*big.Int"}}
-	// Handle []*big.Int array
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, offset, decodeUint256ArrayElement)
-	if err != nil {
-		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for offset pointer in return value {{$i}}")
 	}
-	bigIntArray := make([]*big.Int, len(elems))
-	for j, elem := range elems {
-		bigIntArray[j] = elem.(*big.Int)
+	{
+		ptrBig{{$i}}, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding offset pointer in return value {{$i}}: %w", e)
+		}
+		if !ptrBig{{$i}}.IsUint64() {
+			return result, errors.New("offset pointer too large in return value {{$i}}")
+		}
+		elems, _, e2 := decodeArray(data, int(ptrBig{{$i}}.Uint64()), decodeUint256ArrayElement)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", e2)
+		}
+		arr{{$i}} := make([]*big.Int, len(elems))
+		for j, elem := range elems {
+			arr{{$i}}[j] = elem.(*big.Int)
+		}
+		result.{{$output.Name | title}} = arr{{$i}}
 	}
-	result.{{$output.Name | title}} = bigIntArray
-	offset = nextOffset
+	offset += 32
 	{{- else if eq $output.Type.TypeName "[]uint64"}}
-	// Handle []uint64 array
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, offset, func(d []byte) (interface{}, error) { return decodeUint64(d) })
-	if err != nil {
-		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for offset pointer in return value {{$i}}")
 	}
-	uint64Array := make([]uint64, len(elems))
-	for j, elem := range elems {
-		uint64Array[j] = elem.(uint64)
+	{
+		ptrBig{{$i}}, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding offset pointer in return value {{$i}}: %w", e)
+		}
+		if !ptrBig{{$i}}.IsUint64() {
+			return result, errors.New("offset pointer too large in return value {{$i}}")
+		}
+		elems, _, e2 := decodeArray(data, int(ptrBig{{$i}}.Uint64()), func(d []byte) (interface{}, error) { return decodeUint64(d) })
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", e2)
+		}
+		arr{{$i}} := make([]uint64, len(elems))
+		for j, elem := range elems {
+			arr{{$i}}[j] = elem.(uint64)
+		}
+		result.{{$output.Name | title}} = arr{{$i}}
 	}
-	result.{{$output.Name | title}} = uint64Array
-	offset = nextOffset
+	offset += 32
 	{{- else if eq $output.Type.TypeName "[]Address"}}
-	// Handle []Address array
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, offset, decodeAddressArrayElement)
-	if err != nil {
-		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for offset pointer in return value {{$i}}")
 	}
-	addressArray := make([]Address, len(elems))
-	for j, elem := range elems {
-		addressArray[j] = elem.(Address)
+	{
+		ptrBig{{$i}}, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding offset pointer in return value {{$i}}: %w", e)
+		}
+		if !ptrBig{{$i}}.IsUint64() {
+			return result, errors.New("offset pointer too large in return value {{$i}}")
+		}
+		elems, _, e2 := decodeArray(data, int(ptrBig{{$i}}.Uint64()), decodeAddressArrayElement)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", e2)
+		}
+		arr{{$i}} := make([]Address, len(elems))
+		for j, elem := range elems {
+			arr{{$i}}[j] = elem.(Address)
+		}
+		result.{{$output.Name | title}} = arr{{$i}}
 	}
-	result.{{$output.Name | title}} = addressArray
-	offset = nextOffset
+	offset += 32
 	{{- else if eq $output.Type.TypeName "[]bool"}}
-	// Handle []bool array
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, offset, decodeBoolArrayElement)
-	if err != nil {
-		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for offset pointer in return value {{$i}}")
 	}
-	boolArray := make([]bool, len(elems))
-	for j, elem := range elems {
-		boolArray[j] = elem.(bool)
+	{
+		ptrBig{{$i}}, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding offset pointer in return value {{$i}}: %w", e)
+		}
+		if !ptrBig{{$i}}.IsUint64() {
+			return result, errors.New("offset pointer too large in return value {{$i}}")
+		}
+		elems, _, e2 := decodeArray(data, int(ptrBig{{$i}}.Uint64()), decodeBoolArrayElement)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", e2)
+		}
+		arr{{$i}} := make([]bool, len(elems))
+		for j, elem := range elems {
+			arr{{$i}}[j] = elem.(bool)
+		}
+		result.{{$output.Name | title}} = arr{{$i}}
 	}
-	result.{{$output.Name | title}} = boolArray
-	offset = nextOffset
+	offset += 32
 	{{- else if eq $output.Type.TypeName "string"}}
-	// Handle string
-	var nextOffset int
-	valString, nextOffset, err = decodeString(data, offset)
-	if err != nil {
-		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for offset pointer in return value {{$i}}")
+	}
+	{
+		ptrBig{{$i}}, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding offset pointer in return value {{$i}}: %w", e)
+		}
+		if !ptrBig{{$i}}.IsUint64() {
+			return result, errors.New("offset pointer too large in return value {{$i}}")
+		}
+		var e2 error
+		valString, _, e2 = decodeString(data, int(ptrBig{{$i}}.Uint64()))
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", e2)
+		}
 	}
 	result.{{$output.Name | title}} = valString
-	offset = nextOffset
+	offset += 32
 	{{- else if eq $output.Type.TypeName "[]byte"}}
-	// Handle []byte
-	var nextOffset int
-	valBytes, nextOffset, err = decodeBytes(data, offset)
-	if err != nil {
-		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for offset pointer in return value {{$i}}")
+	}
+	{
+		ptrBig{{$i}}, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding offset pointer in return value {{$i}}: %w", e)
+		}
+		if !ptrBig{{$i}}.IsUint64() {
+			return result, errors.New("offset pointer too large in return value {{$i}}")
+		}
+		var e2 error
+		valBytes, _, e2 = decodeBytes(data, int(ptrBig{{$i}}.Uint64()))
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", e2)
+		}
 	}
 	result.{{$output.Name | title}} = valBytes
-	offset = nextOffset
-	{{- else}}
-	// Handle struct types in multi-return
+	offset += 32
+	{{- else if $output.Type.IsStruct}}
 	{{- range $.Contract.Structs}}
 	{{- if eq .Name $output.Type.TypeName}}
-	var structVal {{.Name}}
-	var nextOffset int
-	structVal, nextOffset, err = decode{{.Name}}(data, offset)
-	if err != nil {
-		return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+	{
+		var sv {{.Name}}
+		sv, nextOffset, err = decode{{.Name}}(data, offset)
+		if err != nil {
+			return result, fmt.Errorf("decoding return value {{$i}}: %w", err)
+		}
+		result.{{$output.Name | title}} = sv
+		offset = nextOffset
 	}
-	result.{{$output.Name | title}} = structVal
-	offset = nextOffset
 	{{- end}}
 	{{- end}}
-	// Handle struct array types in multi-return
-	{{- if and $output.Type.IsSlice (gt (len $output.Type.TypeName) 2)}}
+	{{- else if $output.Type.IsSlice}}
 	{{- $elemType := slice $output.Type.TypeName 2}}
 	{{- range $.Contract.Structs}}
 	{{- if eq .Name $elemType}}
+	// Struct array: read offset pointer then decode at pointed location
 	if len(data) < offset+32 {
-		return result, errors.New("insufficient data for array length in return value {{$i}}")
+		return result, errors.New("insufficient data for array offset in return value {{$i}}")
 	}
-	val, err := decodeUint256(data[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding array length in return value {{$i}}: %w", err)
-	}
-	if !val.IsUint64() {
-		return result, errors.New("array length too large in return value {{$i}}")
-	}
-	length := int(val.Uint64())
-	offset += 32
-	
-	structArray := make({{$output.Type.TypeName}}, length)
-	for j := 0; j < length; j++ {
-		var elem {{.Name}}
-		var nextOffset int
-		elem, nextOffset, err = decode{{.Name}}(data, offset)
-		if err != nil {
-			return result, fmt.Errorf("decoding array element %d in return value {{$i}}: %w", j, err)
+	{
+		ptrVal{{$i}}, e := decodeUint256(data[offset:offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding array offset in return value {{$i}}: %w", e)
 		}
-		structArray[j] = elem
-		offset = nextOffset
+		if !ptrVal{{$i}}.IsUint64() {
+			return result, errors.New("array offset too large in return value {{$i}}")
+		}
+		arrOff{{$i}} := int(ptrVal{{$i}}.Uint64())
+		if len(data) < arrOff{{$i}}+32 {
+			return result, errors.New("insufficient data for array length in return value {{$i}}")
+		}
+		lenVal{{$i}}, e2 := decodeUint256(data[arrOff{{$i}}:arrOff{{$i}}+32])
+		if e2 != nil {
+			return result, fmt.Errorf("decoding array length in return value {{$i}}: %w", e2)
+		}
+		if !lenVal{{$i}}.IsUint64() {
+			return result, errors.New("array length too large in return value {{$i}}")
+		}
+		length{{$i}} := int(lenVal{{$i}}.Uint64())
+		arr{{$i}} := make({{$output.Type.TypeName}}, length{{$i}})
+		elemOff{{$i}} := arrOff{{$i}} + 32
+		for j := 0; j < length{{$i}}; j++ {
+			var elem {{.Name}}
+			elem, elemOff{{$i}}, err = decode{{.Name}}(data, elemOff{{$i}})
+			if err != nil {
+				return result, fmt.Errorf("decoding array element %d in return value {{$i}}: %w", j, err)
+			}
+			arr{{$i}}[j] = elem
+		}
+		result.{{$output.Name | title}} = arr{{$i}}
 	}
-	result.{{$output.Name | title}} = structArray
+	offset += 32
 	{{- end}}
 	{{- end}}
 	{{- else}}
 	return result, errors.New("unsupported multi-return type: {{$output.Type.TypeName}}")
-	{{- end}}
 	{{- end}}
 	{{- end}}
 	return result, nil

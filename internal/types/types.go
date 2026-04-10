@@ -61,17 +61,6 @@ func (h HexData) Bytes() []byte {
 	return data
 }
 
-// CompileConfig holds configuration for Solidity compilation
-type CompileConfig struct {
-	Inputs       []string // Input files, dirs, or globs
-	Output       string   // Output directory
-	Includes     []string // Include directories
-	Optimize     bool     // Enable optimizer
-	OptimizeRuns int      // Optimizer runs
-	EVMVersion   string   // EVM version
-	ViaIR        bool     // Via IR compilation
-}
-
 // CompileResult represents the standard JSON output from solc
 type CompileResult struct {
 	Contracts map[string]map[string]ContractResult `json:"contracts"`
@@ -199,6 +188,7 @@ type GoType struct {
 	IsSlice    bool   // for dynamic arrays
 	IsPtr      bool   // for big.Int
 	IsSigned   bool   // for distinguishing int256 vs uint256 when both map to *big.Int
+	IsStruct   bool   // for tuple/struct types
 }
 
 // CombinedJSON represents the structure of solc --combined-json output
