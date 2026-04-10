@@ -1,6 +1,6 @@
 module github.com/otherview/solgen
 
-go 1.21
+go 1.26.1
 
 require (
 	github.com/ethereum/go-ethereum v1.13.5

@@ -2,348 +2,295 @@
 
 package gen
 
-// structDecodersTemplate generates struct decoder functions
+// structDecodersTemplate generates struct decoder functions.
+//
+// Each decoder uses the standard ABI head-tail layout:
+//   - Phase 1 (head): static fields are decoded inline (32 bytes each);
+//     dynamic fields (string, []byte, slices) occupy a 32-byte relative-offset
+//     slot in the head and are decoded in Phase 2.
+//   - Phase 2 (tail): dynamic fields are decoded at their absolute positions
+//     (baseOffset + relative_offset).
+//
+// Nested struct types are treated as static in the outer head; if the nested
+// struct itself has dynamic fields, its own decoder handles those internally.
 const structDecodersTemplate = `{{/* Generate struct decoders for all structs */}}
 {{- range .Contract.Structs}}
-// decode{{.Name}} decodes a {{.Name}} struct from ABI-encoded data
+// decode{{.Name}} decodes a {{.Name}} struct from ABI-encoded data starting at offset.
+// It returns the decoded value and the offset of the next field after the head section.
 func decode{{.Name}}(data []byte, offset int) ({{.Name}}, int, error) {
 	var result {{.Name}}
-	{{- $needsVal := false}}
-	{{- $needsValAddr := false}}
-	{{- $needsValHash := false}}
-	{{- $needsValBool := false}}
-	{{- $needsValStr := false}}
-	{{- $needsValBytes := false}}
-	{{- $needsValUint64 := false}}
-	{{- $needsValUint32 := false}}
-	{{- $needsValUint16 := false}}
-	{{- $needsValUint8 := false}}
-	{{- $needsValInt64 := false}}
-	{{- $needsValBytes1 := false}}
-	{{- $needsValBytes32 := false}}
-	{{- range .Fields}}
-		{{- if or (eq .Type.TypeName "*big.Int") (and .Type.IsSlice (or (eq .Type.TypeName "[]*big.Int") (hasPrefix .Type.TypeName "[]")))}}
-			{{- $needsVal = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "Address"}}
-			{{- $needsValAddr = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "Hash"}}
-			{{- $needsValHash = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "bool"}}
-			{{- $needsValBool = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "string"}}
-			{{- $needsValStr = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "[]byte"}}
-			{{- $needsValBytes = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "uint64"}}
-			{{- $needsValUint64 = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "uint32"}}
-			{{- $needsValUint32 = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "uint16"}}
-			{{- $needsValUint16 = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "uint8"}}
-			{{- $needsValUint8 = true}}
-		{{- end}}
-		{{- if or (eq .Type.TypeName "int64") (eq .Type.TypeName "int8") (eq .Type.TypeName "int16") (eq .Type.TypeName "int32")}}
-			{{- $needsValInt64 = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "[1]byte"}}
-			{{- $needsValBytes1 = true}}
-		{{- end}}
-		{{- if eq .Type.TypeName "[32]byte"}}
-			{{- $needsValBytes32 = true}}
-		{{- end}}
-	{{- end}}
-	{{- if $needsVal}}
-	var val *big.Int
-	{{- end}}
-	{{- if $needsValAddr}}
-	var valAddr Address
-	{{- end}}
-	{{- if $needsValHash}}
-	var valHash Hash
-	{{- end}}
-	{{- if $needsValBool}}
-	var valBool bool
-	{{- end}}
-	{{- if $needsValStr}}
-	var valStr string
-	{{- end}}
-	{{- if $needsValBytes}}
-	var valBytes []byte
-	{{- end}}
-	{{- if $needsValUint64}}
-	var valUint64 uint64
-	{{- end}}
-	{{- if $needsValUint32}}
-	var valUint32 uint32
-	{{- end}}
-	{{- if $needsValUint16}}
-	var valUint16 uint16
-	{{- end}}
-	{{- if $needsValUint8}}
-	var valUint8 uint8
-	{{- end}}
-	{{- if $needsValInt64}}
-	var valInt64 int64
-	{{- end}}
-	{{- if $needsValBytes1}}
-	var valBytes1 [1]byte
-	{{- end}}
-	{{- if $needsValBytes32}}
-	var valBytes32 [32]byte
-	{{- end}}
-	var err error
-	currentOffset := offset
+	baseOffset := offset
+	headOffset := offset
+
+	// ── Phase 1: head section ──────────────────────────────────────────────────
+	// Static fields are decoded inline. Dynamic fields (string, []byte, slices)
+	// store a relative-offset pointer here; the actual data is in the tail.
 	{{- $structName := .Name}}
-	{{- range .Fields}}
-	{{- if eq .Type.TypeName "*big.Int"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	{{- range $i, $field := .Fields}}
+	{{- if isDynamic $field.Type}}
+	// {{$field.Name}} (dynamic): read relative-offset pointer
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}} offset pointer")
 	}
-	{{- if .Type.IsSigned}}
-	val, err = decodeInt256(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	relOff{{$i}}, errRO{{$i}} := decodeUint256(data[headOffset : headOffset+32])
+	if errRO{{$i}} != nil {
+		return result, 0, fmt.Errorf("reading {{$structName}}.{{$field.Name}} offset: %w", errRO{{$i}})
 	}
-	result.{{.Name}} = val
+	if !relOff{{$i}}.IsUint64() {
+		return result, 0, errors.New("{{$structName}}.{{$field.Name}} offset too large")
+	}
+	absOff{{$i}} := baseOffset + int(relOff{{$i}}.Uint64())
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "*big.Int"}}
+	// {{$field.Name}} (static *big.Int)
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
+	}
+	{{- if $field.Type.IsSigned}}
+	val{{$i}}, err{{$i}} := decodeInt256(data[headOffset : headOffset+32])
 	{{- else}}
-	val, err = decodeUint256(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
-	}
-	result.{{.Name}} = val
+	val{{$i}}, err{{$i}} := decodeUint256(data[headOffset : headOffset+32])
 	{{- end}}
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "uint64"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valUint64, err = decodeUint64(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "uint64"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valUint64
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "uint8"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	val{{$i}}, err{{$i}} := decodeUint64(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valUint8, err = decodeUint8(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "uint32"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valUint8
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "uint16"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	val{{$i}}, err{{$i}} := decodeUint32(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valUint16, err = decodeUint16(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "uint16"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valUint16
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "uint32"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	val{{$i}}, err{{$i}} := decodeUint16(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valUint32, err = decodeUint32(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "uint8"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valUint32
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "int64"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	val{{$i}}, err{{$i}} := decodeUint8(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valInt64, err = decodeInt64(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "int64"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valInt64
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "int8"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	val{{$i}}, err{{$i}} := decodeInt64(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valInt64, err = decodeInt64(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "int32"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = int8(valInt64)
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "int16"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	raw{{$i}}, err{{$i}} := decodeInt64(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valInt64, err = decodeInt64(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = int32(raw{{$i}})
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "int16"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = int16(valInt64)
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "int32"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	raw{{$i}}, err{{$i}} := decodeInt64(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valInt64, err = decodeInt64(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = int16(raw{{$i}})
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "int8"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = int32(valInt64)
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "bool"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	raw{{$i}}, err{{$i}} := decodeInt64(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valBool, err = decodeBool(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = int8(raw{{$i}})
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "bool"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valBool
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "Address"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	val{{$i}}, err{{$i}} := decodeBool(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valAddr, err = decodeAddress(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "Address"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valAddr
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "Hash"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	val{{$i}}, err{{$i}} := decodeAddress(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valHash, err = decodeHash(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "Hash"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valHash
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "string"}}
-	var nextOffset int
-	valStr, nextOffset, err = decodeString(data, currentOffset)
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	val{{$i}}, err{{$i}} := decodeHash(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	result.{{.Name}} = valStr
-	currentOffset = nextOffset
-	{{- else if eq .Type.TypeName "[]byte"}}
-	var nextOffset int
-	valBytes, nextOffset, err = decodeBytes(data, currentOffset)
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "[1]byte"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valBytes
-	currentOffset = nextOffset
-	{{- else if eq .Type.TypeName "[1]byte"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	val{{$i}}, err{{$i}} := decodeBytes1(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valBytes1, err = decodeBytes1(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else if eq $field.Type.TypeName "[32]byte"}}
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for {{$structName}}.{{$field.Name}}")
 	}
-	result.{{.Name}} = valBytes1
-	currentOffset += 32
-	{{- else if eq .Type.TypeName "[32]byte"}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for {{$structName}}.{{.Name}}")
+	val{{$i}}, err{{$i}} := decodeBytes32(data[headOffset : headOffset+32])
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	valBytes32, err = decodeBytes32(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset += 32
+	{{- else}}
+	// {{$field.Name}}: nested struct type {{$field.Type.TypeName}} — treated as static
+	{{- range $struct := $.Contract.Structs}}
+	{{- if eq $struct.Name $field.Type.TypeName}}
+	val{{$i}}, nextOff{{$i}}, err{{$i}} := decode{{$struct.Name}}(data, headOffset)
+	if err{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", err{{$i}})
 	}
-	result.{{.Name}} = valBytes32
-	currentOffset += 32
-	{{- else if and .Type.IsSlice (eq .Type.TypeName "[]*big.Int")}}
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, currentOffset, decodeUint256ArrayElement)
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = val{{$i}}
+	headOffset = nextOff{{$i}}
+	{{- end}}
+	{{- end}}
+	{{- end}}
+	{{- end}}
+
+	// ── Phase 2: tail section — decode dynamic fields at their absolute offsets ─
+	{{- range $i, $field := .Fields}}
+	{{- if isDynamic $field.Type}}
+	{{- if eq $field.Type.TypeName "string"}}
+	str{{$i}}, _, errStr{{$i}} := decodeString(data, absOff{{$i}})
+	if errStr{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", errStr{{$i}})
 	}
-	result.{{.Name}} = make([]*big.Int, len(elems))
-	for i, elem := range elems {
-		result.{{.Name}}[i] = elem.(*big.Int)
+	result.{{$field.Name}} = str{{$i}}
+	{{- else if eq $field.Type.TypeName "[]byte"}}
+	bytes{{$i}}, _, errB{{$i}} := decodeBytes(data, absOff{{$i}})
+	if errB{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", errB{{$i}})
 	}
-	currentOffset = nextOffset
-	{{- else if and .Type.IsSlice (eq .Type.TypeName "[]uint64")}}
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, currentOffset, func(d []byte) (interface{}, error) { return decodeUint64(d) })
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = bytes{{$i}}
+	{{- else if eq $field.Type.TypeName "[]*big.Int"}}
+	elems{{$i}}, _, errArr{{$i}} := decodeArray(data, absOff{{$i}}, decodeUint256ArrayElement)
+	if errArr{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", errArr{{$i}})
 	}
-	result.{{.Name}} = make([]uint64, len(elems))
-	for i, elem := range elems {
-		result.{{.Name}}[i] = elem.(uint64)
+	arr{{$i}} := make([]*big.Int, len(elems{{$i}}))
+	for j, elem := range elems{{$i}} {
+		arr{{$i}}[j] = elem.(*big.Int)
 	}
-	currentOffset = nextOffset
-	{{- else if and .Type.IsSlice (eq .Type.TypeName "[]Address")}}
-	var elems []interface{}
-	var nextOffset int
-	elems, nextOffset, err = decodeArray(data, currentOffset, decodeAddressArrayElement)
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}}: %w", err)
+	result.{{$field.Name}} = arr{{$i}}
+	{{- else if eq $field.Type.TypeName "[]uint64"}}
+	elems{{$i}}, _, errArr{{$i}} := decodeArray(data, absOff{{$i}}, func(d []byte) (interface{}, error) { return decodeUint64(d) })
+	if errArr{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", errArr{{$i}})
 	}
-	result.{{.Name}} = make([]Address, len(elems))
-	for i, elem := range elems {
-		result.{{.Name}}[i] = elem.(Address)
+	arr{{$i}} := make([]uint64, len(elems{{$i}}))
+	for j, elem := range elems{{$i}} {
+		arr{{$i}}[j] = elem.(uint64)
 	}
-	currentOffset = nextOffset
+	result.{{$field.Name}} = arr{{$i}}
+	{{- else if eq $field.Type.TypeName "[]Address"}}
+	elems{{$i}}, _, errArr{{$i}} := decodeArray(data, absOff{{$i}}, decodeAddressArrayElement)
+	if errArr{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", errArr{{$i}})
+	}
+	arr{{$i}} := make([]Address, len(elems{{$i}}))
+	for j, elem := range elems{{$i}} {
+		arr{{$i}}[j] = elem.(Address)
+	}
+	result.{{$field.Name}} = arr{{$i}}
+	{{- else if eq $field.Type.TypeName "[]bool"}}
+	elems{{$i}}, _, errArr{{$i}} := decodeArray(data, absOff{{$i}}, decodeBoolArrayElement)
+	if errArr{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}: %w", errArr{{$i}})
+	}
+	arr{{$i}} := make([]bool, len(elems{{$i}}))
+	for j, elem := range elems{{$i}} {
+		arr{{$i}}[j] = elem.(bool)
+	}
+	result.{{$field.Name}} = arr{{$i}}
 	{{- else if .Type.IsSlice}}
-	// Handle struct array field: {{.Type.TypeName}}
-	if len(data) < currentOffset+32 {
-		return result, 0, errors.New("insufficient data for struct array length in {{$structName}}.{{.Name}}")
+	// Struct-slice field: {{$field.Type.TypeName}}
+	lenBig{{$i}}, errLen{{$i}} := decodeUint256(data[absOff{{$i}} : absOff{{$i}}+32])
+	if errLen{{$i}} != nil {
+		return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}} length: %w", errLen{{$i}})
 	}
-	val, err = decodeUint256(data[currentOffset:currentOffset+32])
-	if err != nil {
-		return result, 0, fmt.Errorf("decoding {{$structName}}.{{.Name}} length: %w", err)
+	if !lenBig{{$i}}.IsUint64() {
+		return result, 0, errors.New("{{$structName}}.{{$field.Name}} array length too large")
 	}
-	if !val.IsUint64() {
-		return result, 0, errors.New("struct array length too large in {{$structName}}.{{.Name}}")
-	}
-	length := int(val.Uint64())
-	currentOffset += 32
-	
-	elemTypeName := "{{.Type.TypeName}}"[2:] // Remove "[]" prefix
+	length{{$i}} := int(lenBig{{$i}}.Uint64())
+	elemOff{{$i}} := absOff{{$i}} + 32
 	{{- $outerContract := $.Contract}}
-	{{- $fieldName := .Name}}
-	{{- $fieldType := .Type.TypeName}}
+	{{- $fieldType := $field.Type.TypeName}}
 	{{- range $struct := $outerContract.Structs}}
-	if elemTypeName == "{{$struct.Name}}" {
-		result.{{$fieldName}} = make({{$fieldType}}, length)
-		for i := 0; i < length; i++ {
-			var elem {{$struct.Name}}
-			var nextOffsetStruct int
-			elem, nextOffsetStruct, err = decode{{$struct.Name}}(data, currentOffset)
-			if err != nil {
-				return result, 0, fmt.Errorf("decoding {{$structName}}.{{$fieldName}}[%d]: %w", i, err)
-			}
-			result.{{$fieldName}}[i] = elem
-			currentOffset = nextOffsetStruct
+	{{- if eq (print "[]" $struct.Name) $fieldType}}
+	slice{{$i}} := make({{$fieldType}}, length{{$i}})
+	for k := 0; k < length{{$i}}; k++ {
+		elem{{$i}}, nextElemOff{{$i}}, errElem{{$i}} := decode{{$struct.Name}}(data, elemOff{{$i}})
+		if errElem{{$i}} != nil {
+			return result, 0, fmt.Errorf("decoding {{$structName}}.{{$field.Name}}[%d]: %w", k, errElem{{$i}})
 		}
+		slice{{$i}}[k] = elem{{$i}}
+		elemOff{{$i}} = nextElemOff{{$i}}
 	}
+	result.{{$field.Name}} = slice{{$i}}
+	{{- end}}
 	{{- end}}
 	{{- else}}
-	return result, 0, errors.New("unsupported struct field type {{.Type.TypeName}} in {{$structName}}.{{.Name}}")
+	return result, 0, errors.New("unsupported dynamic field type {{$field.Type.TypeName}} in {{$structName}}.{{$field.Name}}")
 	{{- end}}
 	{{- end}}
-	return result, currentOffset, nil
+	{{- end}}
+
+	_ = baseOffset
+	return result, headOffset, nil
 }
 {{- end}}`
 

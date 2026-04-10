@@ -226,37 +226,32 @@ func decodeUint64(data []byte) (uint64, error) {
 	return result, nil
 }
 
-// decodeInt64 decodes a int64 from 32 bytes
+// decodeInt64 decodes an int64 from 32 bytes (ABI sign-extended big-endian).
 func decodeInt64(data []byte) (int64, error) {
 	if len(data) < 32 {
 		return 0, errors.New("insufficient data for int64")
 	}
-	
-	// Check if this is a negative number (MSB set)
+
+	// ABI sign-extension: bytes 0-23 must all match the sign byte
+	// (0x00 for non-negative, 0xFF for negative).
 	isNegative := data[0]&0x80 != 0
-	
-	// Verify upper bytes are consistent (all 0s or all 1s for sign extension)
 	expectedByte := byte(0)
 	if isNegative {
 		expectedByte = 0xFF
 	}
-	
 	for i := 0; i < 24; i++ {
 		if data[i] != expectedByte {
 			return 0, errors.New("value exceeds int64 range")
 		}
 	}
-	
+
+	// Assemble the int64 from the last 8 bytes.
+	// Because data[24..31] already hold the correct two's-complement
+	// representation, no further sign extension is needed.
 	var result int64
 	for i := 24; i < 32; i++ {
 		result = (result << 8) | int64(data[i])
 	}
-	
-	// Sign extend if necessary
-	if isNegative {
-		result |= ^((1 << 32) - 1) // Set upper 32 bits
-	}
-	
 	return result, nil
 }
 

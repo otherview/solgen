@@ -209,61 +209,134 @@ type ErrorInfo struct {
 	Selector  HexData
 }
 
-// Pack encodes method arguments and returns the method selector + encoded arguments
+// Pack encodes method arguments and returns the method selector + encoded arguments.
+// Uses ABI head-tail encoding: static args are inlined in the head (32 bytes each);
+// dynamic args (string, []byte) get a 32-byte offset pointer in the head, with
+// their data appended in the tail section.
 func (pm *PackableMethod) Pack(args ...any) (HexData, error) {
 	// Start with the 4-byte method selector
 	selectorBytes := pm.Selector.Bytes()
 	if len(selectorBytes) == 0 {
 		return "", fmt.Errorf("invalid method selector")
 	}
-	
+
 	// If no arguments, return just the selector
 	if len(args) == 0 {
 		return pm.Selector, nil
 	}
-	
-	// Encode arguments using our ABI implementation
-	var encodedArgs []byte
-	for _, arg := range args {
+
+	type argEncoding struct {
+		data      []byte
+		isDynamic bool
+	}
+
+	encoded := make([]argEncoding, len(args))
+	for i, arg := range args {
+		var data []byte
+		var dynamic bool
+		var err error
 		switch v := arg.(type) {
 		case *big.Int:
-			data, err := encodeUint256(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding big.Int: %w", err)
+			if v.Sign() < 0 {
+				data, err = encodeInt256(v)
+			} else {
+				data, err = encodeUint256(v)
 			}
-			encodedArgs = append(encodedArgs, data...)
+			if err != nil {
+				return "", fmt.Errorf("encoding big.Int arg %d: %w", i, err)
+			}
+		case uint8:
+			data, err = encodeUint256(uint64(v))
+			if err != nil {
+				return "", fmt.Errorf("encoding uint8 arg %d: %w", i, err)
+			}
+		case uint16:
+			data, err = encodeUint256(uint64(v))
+			if err != nil {
+				return "", fmt.Errorf("encoding uint16 arg %d: %w", i, err)
+			}
+		case uint32:
+			data, err = encodeUint256(uint64(v))
+			if err != nil {
+				return "", fmt.Errorf("encoding uint32 arg %d: %w", i, err)
+			}
+		case uint64:
+			data, err = encodeUint256(v)
+			if err != nil {
+				return "", fmt.Errorf("encoding uint64 arg %d: %w", i, err)
+			}
+		case int8:
+			data, err = encodeInt256(big.NewInt(int64(v)))
+			if err != nil {
+				return "", fmt.Errorf("encoding int8 arg %d: %w", i, err)
+			}
+		case int16:
+			data, err = encodeInt256(big.NewInt(int64(v)))
+			if err != nil {
+				return "", fmt.Errorf("encoding int16 arg %d: %w", i, err)
+			}
+		case int32:
+			data, err = encodeInt256(big.NewInt(int64(v)))
+			if err != nil {
+				return "", fmt.Errorf("encoding int32 arg %d: %w", i, err)
+			}
+		case int64:
+			data, err = encodeInt256(big.NewInt(v))
+			if err != nil {
+				return "", fmt.Errorf("encoding int64 arg %d: %w", i, err)
+			}
 		case Address:
-			data, err := encodeAddress(v)
+			data, err = encodeAddress(v)
 			if err != nil {
-				return "", fmt.Errorf("encoding address: %w", err)
+				return "", fmt.Errorf("encoding address arg %d: %w", i, err)
 			}
-			encodedArgs = append(encodedArgs, data...)
 		case bool:
-			data, err := encodeBool(v)
+			data, err = encodeBool(v)
 			if err != nil {
-				return "", fmt.Errorf("encoding bool: %w", err)
+				return "", fmt.Errorf("encoding bool arg %d: %w", i, err)
 			}
-			encodedArgs = append(encodedArgs, data...)
 		case string:
-			data, err := encodeString(v)
+			data, err = encodeString(v)
 			if err != nil {
-				return "", fmt.Errorf("encoding string: %w", err)
+				return "", fmt.Errorf("encoding string arg %d: %w", i, err)
 			}
-			encodedArgs = append(encodedArgs, data...)
+			dynamic = true
 		case []byte:
-			data, err := encodeBytes(v)
+			data, err = encodeBytes(v)
 			if err != nil {
-				return "", fmt.Errorf("encoding bytes: %w", err)
+				return "", fmt.Errorf("encoding bytes arg %d: %w", i, err)
 			}
-			encodedArgs = append(encodedArgs, data...)
+			dynamic = true
 		default:
 			return "", fmt.Errorf("unsupported argument type: %T", arg)
 		}
+		encoded[i] = argEncoding{data: data, isDynamic: dynamic}
 	}
-	
-	// Combine selector and encoded arguments
-	result := hex.EncodeToString(append(selectorBytes, encodedArgs...))
-	return HexData("0x" + result), nil
+
+	// Build ABI head-tail encoding:
+	// Head: static args inlined (32 bytes); dynamic args get a 32-byte offset pointer.
+	// Tail: dynamic args' encoded data appended in order.
+	headSize := len(args) * 32
+	tailOffset := headSize
+
+	var head []byte
+	var tail []byte
+	for _, enc := range encoded {
+		if enc.isDynamic {
+			offsetBytes, err := encodeUint256(uint64(tailOffset))
+			if err != nil {
+				return "", fmt.Errorf("encoding offset pointer: %w", err)
+			}
+			head = append(head, offsetBytes...)
+			tail = append(tail, enc.data...)
+			tailOffset += len(enc.data)
+		} else {
+			head = append(head, enc.data...)
+		}
+	}
+
+	payload := append(selectorBytes, append(head, tail...)...)
+	return HexData("0x" + hex.EncodeToString(payload)), nil
 }
 
 // MustPack encodes method arguments and panics on error

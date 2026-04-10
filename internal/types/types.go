@@ -46,10 +46,8 @@ func (h HexData) Bytes() []byte {
 	}
 	
 	// Remove 0x prefix if present
-	if strings.HasPrefix(hexStr, "0x") {
-		hexStr = hexStr[2:]
-	}
-	
+	hexStr = strings.TrimPrefix(hexStr, "0x")
+
 	if hexStr == "" {
 		return nil
 	}
@@ -59,17 +57,6 @@ func (h HexData) Bytes() []byte {
 		panic("invalid hex string in generated code: " + string(h))
 	}
 	return data
-}
-
-// CompileConfig holds configuration for Solidity compilation
-type CompileConfig struct {
-	Inputs       []string // Input files, dirs, or globs
-	Output       string   // Output directory
-	Includes     []string // Include directories
-	Optimize     bool     // Enable optimizer
-	OptimizeRuns int      // Optimizer runs
-	EVMVersion   string   // EVM version
-	ViaIR        bool     // Via IR compilation
 }
 
 // CompileResult represents the standard JSON output from solc
@@ -199,6 +186,7 @@ type GoType struct {
 	IsSlice    bool   // for dynamic arrays
 	IsPtr      bool   // for big.Int
 	IsSigned   bool   // for distinguishing int256 vs uint256 when both map to *big.Int
+	IsStruct   bool   // for tuple/struct types
 }
 
 // CombinedJSON represents the structure of solc --combined-json output

@@ -153,14 +153,17 @@ func parseContract(sourceFile, contractName string, result types.ContractResult)
 	contract.Events = events
 
 	// Parse errors
-	errors, err := parseErrors(parsedABI)
+	errors, err := parseErrors(parsedABI, registry)
 	if err != nil {
 		return nil, fmt.Errorf("parsing errors: %w", err)
 	}
 	contract.Errors = errors
 
 	// Parse constructor
-	constructor := parseConstructor(parsedABI, result.EVM.Bytecode.LinkReferences)
+	constructor, err := parseConstructor(parsedABI, result.EVM.Bytecode.LinkReferences, registry)
+	if err != nil {
+		return nil, fmt.Errorf("parsing constructor: %w", err)
+	}
 	contract.Constructor = constructor
 
 	// Add all collected struct definitions
@@ -242,78 +245,6 @@ func parseMethodsWithRegistry(parsedABI abi.ABI, methodIds map[string]string, re
 	return methods, nil
 }
 
-// parseMethods extracts and processes contract methods
-func parseMethods(parsedABI abi.ABI, methodIds map[string]string) ([]types.Method, error) {
-	var methods []types.Method
-	methodNames := make(map[string]int) // track name collisions
-
-	// First pass: count method names for overload detection
-	for _, method := range parsedABI.Methods {
-		methodNames[method.Name]++
-	}
-
-	// Second pass: create method descriptors
-	for _, method := range parsedABI.Methods {
-		selector := methodIds[method.Sig]
-		if selector == "" {
-			return nil, fmt.Errorf("missing method identifier for %s", method.Sig)
-		}
-
-		// Generate method name with overload suffix if needed
-		methodName := method.Name
-		if methodNames[method.Name] > 1 {
-			methodName = generateOverloadName(method.Name, method.Sig, selector)
-		}
-
-		// Parse inputs and outputs
-		inputs, err := parseParameters(method.Inputs, false)
-		if err != nil {
-			return nil, fmt.Errorf("parsing inputs for method %s: %w", method.Sig, err)
-		}
-
-		outputs, err := parseParameters(method.Outputs, false)
-		if err != nil {
-			return nil, fmt.Errorf("parsing outputs for method %s: %w", method.Sig, err)
-		}
-
-		// Create input/output structs if needed
-		var inputStruct, outputStruct *types.Struct
-
-		if len(inputs) > 1 {
-			inputStruct = &types.Struct{
-				Name:   exportIdentifier(methodName) + "Input",
-				Fields: parametersToFields(inputs),
-			}
-		}
-
-		if len(outputs) > 1 {
-			outputStruct = &types.Struct{
-				Name:   exportIdentifier(methodName) + "Output",
-				Fields: parametersToFields(outputs),
-			}
-		}
-
-		methods = append(methods, types.Method{
-			Name:         methodName,
-			Signature:    method.Sig,
-			Selector:     types.HexData(prefixHex(selector)),
-			Inputs:       inputs,
-			Outputs:      outputs,
-			InputStruct:  inputStruct,
-			OutputStruct: outputStruct,
-		})
-	}
-
-	// Sort methods for deterministic output
-	sort.Slice(methods, func(i, j int) bool {
-		if methods[i].Name != methods[j].Name {
-			return methods[i].Name < methods[j].Name
-		}
-		return methods[i].Signature < methods[j].Signature
-	})
-
-	return methods, nil
-}
 
 // parseEventsWithRegistry extracts and processes contract events using struct registry
 func parseEventsWithRegistry(parsedABI abi.ABI, registry *structRegistry) ([]types.Event, error) {
@@ -338,7 +269,7 @@ func parseEventsWithRegistry(parsedABI abi.ABI, registry *structRegistry) ([]typ
 		// Convert common.Hash to types.Hash
 		var typesHash types.Hash
 		copy(typesHash[:], topic[:])
-		
+
 		events = append(events, types.Event{
 			Name:   event.Name,
 			Topic:  typesHash,
@@ -347,42 +278,7 @@ func parseEventsWithRegistry(parsedABI abi.ABI, registry *structRegistry) ([]typ
 		})
 	}
 
-	return events, nil
-}
-
-// parseEvents extracts and processes contract events
-func parseEvents(parsedABI abi.ABI) ([]types.Event, error) {
-	var events []types.Event
-
-	for _, event := range parsedABI.Events {
-		// Calculate event topic (hash of signature)
-		topic := common.BytesToHash(crypto.Keccak256([]byte(event.Sig)))
-
-		// Parse event inputs
-		inputs, err := parseParameters(event.Inputs, true)
-		if err != nil {
-			return nil, fmt.Errorf("parsing inputs for event %s: %w", event.Sig, err)
-		}
-
-		// Create event struct
-		eventStruct := &types.Struct{
-			Name:   event.Name + "Event",
-			Fields: parametersToFields(inputs),
-		}
-
-		// Convert common.Hash to types.Hash
-		var typesHash types.Hash
-		copy(typesHash[:], topic[:])
-		
-		events = append(events, types.Event{
-			Name:   event.Name,
-			Topic:  typesHash,
-			Inputs: inputs,
-			Struct: eventStruct,
-		})
-	}
-
-	// Sort events for deterministic output
+	// Sort for deterministic output
 	sort.Slice(events, func(i, j int) bool {
 		return events[i].Name < events[j].Name
 	})
@@ -390,16 +286,17 @@ func parseEvents(parsedABI abi.ABI) ([]types.Event, error) {
 	return events, nil
 }
 
+
 // parseErrors extracts and processes contract errors
-func parseErrors(parsedABI abi.ABI) ([]types.ContractError, error) {
+func parseErrors(parsedABI abi.ABI, registry *structRegistry) ([]types.ContractError, error) {
 	var errors []types.ContractError
 
 	for _, abiError := range parsedABI.Errors {
 		// Calculate error selector (first 4 bytes of signature hash)
 		selector := common.BytesToHash(crypto.Keccak256([]byte(abiError.Sig))).Hex()[:10]
 
-		// Parse error inputs
-		inputs, err := parseParameters(abiError.Inputs, false)
+		// Parse error inputs (register any tuple types into the shared registry)
+		inputs, err := parseParametersWithRegistry(abiError.Inputs, false, registry)
 		if err != nil {
 			return nil, fmt.Errorf("parsing inputs for error %s: %w", abiError.Sig, err)
 		}
@@ -427,17 +324,18 @@ func parseErrors(parsedABI abi.ABI) ([]types.ContractError, error) {
 	return errors, nil
 }
 
-// parseConstructor extracts constructor information
-func parseConstructor(parsedABI abi.ABI, linkRefs map[string]map[string][]types.LinkRef) *types.Constructor {
+// parseConstructor extracts constructor information.
+// Returns (nil, nil) when the ABI has no constructor definition.
+func parseConstructor(parsedABI abi.ABI, linkRefs map[string]map[string][]types.LinkRef, registry *structRegistry) (*types.Constructor, error) {
 	constructor := parsedABI.Constructor
 	if constructor.Type != abi.Constructor {
-		return nil
+		return nil, nil
 	}
 
-	inputs, err := parseParameters(constructor.Inputs, false)
+	// Register any tuple types from constructor parameters into the shared registry.
+	inputs, err := parseParametersWithRegistry(constructor.Inputs, false, registry)
 	if err != nil {
-		// Log error but don't fail, constructor is optional
-		return nil
+		return nil, fmt.Errorf("parsing constructor inputs: %w", err)
 	}
 
 	var inputStruct *types.Struct
@@ -448,7 +346,7 @@ func parseConstructor(parsedABI abi.ABI, linkRefs map[string]map[string][]types.
 		}
 	}
 
-	// Convert link references
+	// Flatten link references (file → lib → []ref) into (lib → []ref).
 	linkReferences := make(map[string][]types.LinkRef)
 	for _, fileRefs := range linkRefs {
 		for libName, refs := range fileRefs {
@@ -466,7 +364,7 @@ func parseConstructor(parsedABI abi.ABI, linkRefs map[string]map[string][]types.
 		Inputs:         inputs,
 		InputStruct:    inputStruct,
 		LinkReferences: linkReferences,
-	}
+	}, nil
 }
 
 // parseParametersWithRegistry converts ABI arguments to our parameter model using struct registry
@@ -494,30 +392,6 @@ func parseParametersWithRegistry(args abi.Arguments, allowIndexed bool, registry
 	return params, nil
 }
 
-// parseParameters converts ABI arguments to our parameter model
-func parseParameters(args abi.Arguments, allowIndexed bool) ([]types.Parameter, error) {
-	var params []types.Parameter
-
-	for i, arg := range args {
-		goType, err := mapSolidityToGoType(arg.Type)
-		if err != nil {
-			return nil, fmt.Errorf("mapping type %s: %w", arg.Type.String(), err)
-		}
-
-		name := arg.Name
-		if name == "" {
-			name = fmt.Sprintf("Field%d", i+1) // 1-based indexing
-		}
-
-		params = append(params, types.Parameter{
-			Name:    sanitizeIdentifier(name),
-			Type:    goType,
-			Indexed: allowIndexed && arg.Indexed,
-		})
-	}
-
-	return params, nil
-}
 
 // parametersToFields converts parameters to struct fields
 func parametersToFields(params []types.Parameter) []types.StructField {
@@ -602,6 +476,7 @@ func mapSolidityToGoType(abiType abi.Type) (types.GoType, error) {
 		}
 		return types.GoType{
 			TypeName: structName,
+			IsStruct: true,
 		}, nil
 
 	default:
@@ -678,6 +553,7 @@ func mapSolidityToGoTypeWithRegistry(abiType abi.Type, registry *structRegistry)
 		
 		return types.GoType{
 			TypeName: structName,
+			IsStruct: true,
 		}, nil
 	default:
 		// For non-composite types, use the original mapping function
@@ -685,43 +561,43 @@ func mapSolidityToGoTypeWithRegistry(abiType abi.Type, registry *structRegistry)
 	}
 }
 
-// extractStructName extracts a clean struct name from the raw tuple name
-// Examples: 
-//   "struct TestStructArray.User" -> "User"
-//   "TestStructArrayUser" -> "User" (from TupleRawName format)
-//   "TestContractUser" -> "User"
-//   "struct MyContract.Company" -> "Company"
-//   "" -> "" (anonymous tuple)
+// extractStructName extracts a clean struct name from the raw tuple name.
+//
+// Modern solc always uses dot-qualified names in internalType, e.g.
+// "struct ContractName.StructName", so the dot-split path is the primary
+// code path. The backwards-scan heuristic is retained as a fallback for
+// legacy or non-standard names that lack a dot separator.
+//
+// Examples:
+//
+//	"struct MyContract.User"  -> "User"
+//	"TestContractUser"        -> "User"  (heuristic: last word-boundary capital)
+//	""                        -> ""      (anonymous tuple)
 func extractStructName(rawName string) string {
 	if rawName == "" {
 		return ""
 	}
-	
-	// Remove "struct " prefix if present
-	if strings.HasPrefix(rawName, "struct ") {
-		rawName = rawName[7:]
+
+	// Strip "struct " prefix produced by go-ethereum's ABI parser.
+	rawName = strings.TrimPrefix(rawName, "struct ")
+
+	// Dot-qualified: take the last segment ("ContractName.StructName" → "StructName").
+	if idx := strings.LastIndex(rawName, "."); idx >= 0 {
+		return exportIdentifier(rawName[idx+1:])
 	}
-	
-	// Split on "." and take the last part (the actual struct name)
-	parts := strings.Split(rawName, ".")
-	if len(parts) > 1 {
-		return exportIdentifier(parts[len(parts)-1])
-	}
-	
-	// Handle TupleRawName format like "TestContractUser" -> "User"
-	// Pattern: find the last capital letter that starts the struct name
-	// This handles cases like "TestContractUser" -> "User", "MyContractCompany" -> "Company"
+
+	// Fallback heuristic for non-dot names: scan backwards for the last
+	// uppercase letter that follows a lowercase letter, treating it as the
+	// start of the struct name (e.g., "TestContractUser" → "User").
+	// NOTE: this heuristic can misidentify multi-word struct names such as
+	// "TestContractMyStruct" (returns "Struct" instead of "MyStruct").
+	// In practice these names only appear in legacy or test ABI JSON.
 	for i := len(rawName) - 1; i > 0; i-- {
-		if rawName[i] >= 'A' && rawName[i] <= 'Z' {
-			// Found a capital letter, check if it's likely the start of the struct name
-			// Simple heuristic: if it's not the first char and the previous isn't uppercase
-			if i > 0 && rawName[i-1] >= 'a' && rawName[i-1] <= 'z' {
-				return exportIdentifier(rawName[i:])
-			}
+		if rawName[i] >= 'A' && rawName[i] <= 'Z' && rawName[i-1] >= 'a' && rawName[i-1] <= 'z' {
+			return exportIdentifier(rawName[i:])
 		}
 	}
-	
-	// For now, just use the full name as fallback
+
 	return exportIdentifier(rawName)
 }
 

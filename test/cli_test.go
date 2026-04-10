@@ -57,14 +57,14 @@ func TestCLI_ProcessJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create pipe: %v", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	os.Stdin = r
 
 	// Write mock input to pipe in a goroutine
 	go func() {
-		defer w.Close()
-		w.Write([]byte(mockInput))
+		defer func() { _ = w.Close() }()
+		_, _ = w.Write([]byte(mockInput))
 	}()
 
 	// Capture stdout to check for errors
@@ -75,7 +75,7 @@ func TestCLI_ProcessJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create output pipe: %v", err)
 	}
-	defer rOut.Close()
+	defer func() { _ = rOut.Close() }()
 
 	os.Stdout = wOut
 
@@ -87,7 +87,7 @@ func TestCLI_ProcessJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create error pipe: %v", err)
 	}
-	defer rErr.Close()
+	defer func() { _ = rErr.Close() }()
 
 	os.Stderr = wErr
 
@@ -105,8 +105,8 @@ func TestCLI_ProcessJSON(t *testing.T) {
 	}
 
 	// Close pipes
-	wOut.Close()
-	wErr.Close()
+	_ = wOut.Close()
+	_ = wErr.Close()
 
 	// Check that output directory was created
 	if _, err := os.Stat(outputDir); os.IsNotExist(err) {

@@ -96,25 +96,30 @@ func (g *Generator) renderContract(contract *types.Contract) (string, error) {
 	return buf.String(), nil
 }
 
-// calculateImports determines which imports are needed for the contract
+// calculateImports determines which imports are needed beyond the base set.
+// The base template already unconditionally imports:
+//
+//	encoding/hex, errors, fmt, math/big, strings
+//
+// This function only collects additional imports required by custom GoType
+// packages that fall outside that base set.
 func (g *Generator) calculateImports(contract *types.Contract) []string {
-	importSet := make(map[string]bool)
-	
-	// Always needed imports for the simplified template
-	importSet["fmt"] = true
+	// Imports already present in the hardcoded template header.
+	baseImports := map[string]bool{
+		"encoding/hex": true,
+		"errors":       true,
+		"fmt":          true,
+		"math/big":     true,
+		"strings":      true,
+	}
 
-	// Check if we need math/big - only include if it appears in struct fields
-	needsBigInt := false
+	importSet := make(map[string]bool)
 	checkGoType := func(goType types.GoType) {
-		if goType.Import != "" && goType.Import != "math/big" {
+		if goType.Import != "" && !baseImports[goType.Import] {
 			importSet[goType.Import] = true
-		}
-		if goType.Import == "math/big" {
-			needsBigInt = true
 		}
 	}
 
-	// Check method structs only (not individual method parameters)
 	for _, method := range contract.Methods {
 		if method.InputStruct != nil {
 			for _, field := range method.InputStruct.Fields {
@@ -127,8 +132,6 @@ func (g *Generator) calculateImports(contract *types.Contract) []string {
 			}
 		}
 	}
-
-	// Check event structs
 	for _, event := range contract.Events {
 		if event.Struct != nil {
 			for _, field := range event.Struct.Fields {
@@ -136,8 +139,6 @@ func (g *Generator) calculateImports(contract *types.Contract) []string {
 			}
 		}
 	}
-
-	// Check error structs
 	for _, err := range contract.Errors {
 		if err.Struct != nil {
 			for _, field := range err.Struct.Fields {
@@ -145,24 +146,16 @@ func (g *Generator) calculateImports(contract *types.Contract) []string {
 			}
 		}
 	}
-
-	// Check constructor struct
 	if contract.Constructor != nil && contract.Constructor.InputStruct != nil {
 		for _, field := range contract.Constructor.InputStruct.Fields {
 			checkGoType(field.Type)
 		}
 	}
 
-	if needsBigInt {
-		importSet["math/big"] = true
-	}
-
-	// Convert to sorted slice
 	var imports []string
 	for imp := range importSet {
 		imports = append(imports, imp)
 	}
-	
 	sort.Strings(imports)
 	return imports
 }
