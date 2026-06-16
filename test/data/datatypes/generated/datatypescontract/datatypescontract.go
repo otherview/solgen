@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"reflect"
 	"strings"
 )
 
@@ -89,24 +90,17 @@ func (h HexData) Bytes() []byte {
 	if hexStr == "" {
 		return nil
 	}
-
-	// Remove 0x prefix if present
-	if len(hexStr) >= 2 && hexStr[:2] == "0x" {
+	if strings.HasPrefix(hexStr, "0x") {
 		hexStr = hexStr[2:]
 	}
-
-	if hexStr == "" {
-		return nil
-	}
-
-	data, err := hex.DecodeString(hexStr)
+	decoded, err := hex.DecodeString(hexStr)
 	if err != nil {
-		panic("invalid hex string in generated code: " + string(h))
+		panic("invalid hex data: " + err.Error())
 	}
-	return data
+	return decoded
 }
 
-// ABI Encoding/Decoding Implementation
+// ABI Encoding Implementation
 
 // encodeUint256 encodes a uint256 value to 32 bytes (big-endian)
 func encodeUint256(val interface{}) ([]byte, error) {
@@ -141,144 +135,177 @@ func encodeUint256(val interface{}) ([]byte, error) {
 	}
 }
 
-// mustEncodeUint256 encodes a uint256 value, panics on error
-func mustEncodeUint256(val interface{}) []byte {
-	result, err := encodeUint256(val)
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
-// encodeAddress encodes an address to 32 bytes (left-padded with zeros)
-func encodeAddress(addr Address) []byte {
-	result := make([]byte, 32)
-	copy(result[12:], addr[:])
-	return result
-}
-
-// encodeBool encodes a boolean to 32 bytes
-func encodeBool(val bool) []byte {
-	result := make([]byte, 32)
-	if val {
-		result[31] = 1
-	}
-	return result
-}
-
-// encodeBytes encodes dynamic bytes
-func encodeBytes(data []byte) []byte {
-	// Length + data + padding
-	length := mustEncodeUint256(uint64(len(data)))
-	padded := make([]byte, ((len(data)+31)/32)*32) // Pad to multiple of 32
-	copy(padded, data)
-	return append(length, padded...)
-}
-
-// encodeInt256 encodes a signed 256-bit integer to 32 bytes (two's complement)
+// encodeInt256 encodes a signed 256-bit integer to 32 bytes using two's complement.
+// Valid range: [-2^255, 2^255-1].
 func encodeInt256(val interface{}) ([]byte, error) {
 	result := make([]byte, 32)
 	switch v := val.(type) {
 	case *big.Int:
-		if v.BitLen() > 255 { // 255 bits for magnitude + 1 for sign
-			return nil, errors.New("value too large for int256")
-		}
 		if v.Sign() >= 0 {
+			// Positive: valid range [0, 2^255-1] → BitLen must be ≤ 255.
+			if v.BitLen() > 255 {
+				return nil, errors.New("value too large for int256")
+			}
 			v.FillBytes(result)
 		} else {
-			// Two's complement for negative numbers
-			pos := new(big.Int).Abs(v)
-			pos.FillBytes(result)
-			// Flip bits
-			for i := range result {
-				result[i] = ^result[i]
+			// Negative: valid range [-2^255, -1].
+			// abs(-2^255) has BitLen == 256, which is the boundary.
+			abs := new(big.Int).Neg(v)
+			minNeg := new(big.Int).Lsh(big.NewInt(1), 255) // 2^255
+			if abs.Cmp(minNeg) > 0 {
+				return nil, errors.New("value too small for int256")
 			}
-			// Add 1
-			carry := byte(1)
-			for i := 31; i >= 0 && carry > 0; i-- {
-				sum := int(result[i]) + int(carry)
-				result[i] = byte(sum)
-				carry = byte(sum >> 8)
-			}
+			// Two's-complement: compute 2^256 + v = 2^256 - abs(v).
+			mask := new(big.Int).Lsh(big.NewInt(1), 256)
+			new(big.Int).Add(mask, v).FillBytes(result)
 		}
 		return result, nil
 	case int64:
-		big.NewInt(v).FillBytes(result)
-		if v < 0 {
-			return encodeInt256(big.NewInt(v))
-		}
-		return result, nil
+		return encodeInt256(big.NewInt(v))
 	case int:
-		return encodeInt256(int64(v))
+		return encodeInt256(big.NewInt(int64(v)))
 	default:
 		return nil, fmt.Errorf("unsupported type for int256: %T", v)
 	}
 }
 
-// mustEncodeInt256 encodes a signed 256-bit integer, panics on error
-func mustEncodeInt256(val interface{}) []byte {
-	result, err := encodeInt256(val)
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
-// encodeFixedBytes encodes fixed-size bytes (e.g., bytes32)
-func encodeFixedBytes(data []byte, size int) []byte {
-	if len(data) > size {
-		panic(fmt.Sprintf("data too large for bytes%d: got %d bytes", size, len(data)))
-	}
+// encodeAddress encodes an address to 32 bytes (zero-padded)
+func encodeAddress(addr Address) ([]byte, error) {
 	result := make([]byte, 32)
-	copy(result[:len(data)], data)
-	return result
-}
-
-// encodeArray encodes dynamic or fixed arrays
-func encodeArray(elements []interface{}) ([]byte, error) {
-	if len(elements) == 0 {
-		return mustEncodeUint256(uint64(0)), nil
-	}
-
-	// For dynamic arrays, start with length
-	result := mustEncodeUint256(uint64(len(elements)))
-
-	// Encode each element
-	for _, elem := range elements {
-		switch v := elem.(type) {
-		case *big.Int:
-			data, err := encodeUint256(v)
-			if err != nil {
-				return nil, fmt.Errorf("encoding array element: %w", err)
-			}
-			result = append(result, data...)
-		case uint64:
-			result = append(result, mustEncodeUint256(v)...)
-		case Address:
-			result = append(result, encodeAddress(v)...)
-		case bool:
-			result = append(result, encodeBool(v)...)
-		default:
-			return nil, fmt.Errorf("unsupported array element type: %T", v)
-		}
-	}
-
+	copy(result[12:32], addr[:])
 	return result, nil
 }
 
-// mustEncodeArray encodes an array, panics on error
-func mustEncodeArray(elements []interface{}) []byte {
-	result, err := encodeArray(elements)
-	if err != nil {
-		panic(err)
+// encodeBool encodes a boolean to 32 bytes
+func encodeBool(val bool) ([]byte, error) {
+	result := make([]byte, 32)
+	if val {
+		result[31] = 1
 	}
-	return result
+	return result, nil
+}
+
+// encodeBytes encodes dynamic bytes
+func encodeBytes(data []byte) ([]byte, error) {
+	// Length (32 bytes) + data (padded to multiple of 32 bytes)
+	length := len(data)
+	lengthBytes, err := encodeUint256(uint64(length))
+	if err != nil {
+		return nil, err
+	}
+
+	// Pad data to multiple of 32 bytes
+	paddedLength := ((length + 31) / 32) * 32
+	paddedData := make([]byte, paddedLength)
+	copy(paddedData, data)
+
+	return append(lengthBytes, paddedData...), nil
 }
 
 // encodeString encodes a string as dynamic bytes
-func encodeString(str string) []byte {
+func encodeString(str string) ([]byte, error) {
 	return encodeBytes([]byte(str))
 }
+
+// encodeFixedBytes encodes fixed-size bytes (e.g., bytes32) as a single static
+// 32-byte word: the value is left-aligned and right-padded with zeros.
+func encodeFixedBytes(val []byte, size int) ([]byte, error) {
+	if size < 1 || size > 32 {
+		return nil, fmt.Errorf("invalid fixed bytes size: %d", size)
+	}
+	if len(val) != size {
+		return nil, fmt.Errorf("fixed bytes length mismatch: got %d, want %d", len(val), size)
+	}
+	result := make([]byte, 32)
+	copy(result, val)
+	return result, nil
+}
+
+// encodeArg encodes a single ABI argument, returning its encoded bytes and
+// whether it is a dynamic type (which gets a 32-byte offset pointer in the head
+// and its data in the tail). It is the per-argument core shared by Pack.
+func encodeArg(arg any) ([]byte, bool, error) {
+	switch v := arg.(type) {
+	case *big.Int:
+		if v.Sign() < 0 {
+			d, err := encodeInt256(v)
+			return d, false, err
+		}
+		d, err := encodeUint256(v)
+		return d, false, err
+	case uint8:
+		d, err := encodeUint256(uint64(v))
+		return d, false, err
+	case uint16:
+		d, err := encodeUint256(uint64(v))
+		return d, false, err
+	case uint32:
+		d, err := encodeUint256(uint64(v))
+		return d, false, err
+	case uint64:
+		d, err := encodeUint256(v)
+		return d, false, err
+	case int8:
+		d, err := encodeInt256(big.NewInt(int64(v)))
+		return d, false, err
+	case int16:
+		d, err := encodeInt256(big.NewInt(int64(v)))
+		return d, false, err
+	case int32:
+		d, err := encodeInt256(big.NewInt(int64(v)))
+		return d, false, err
+	case int64:
+		d, err := encodeInt256(big.NewInt(v))
+		return d, false, err
+	case Address:
+		d, err := encodeAddress(v)
+		return d, false, err
+	case bool:
+		d, err := encodeBool(v)
+		return d, false, err
+	case string:
+		d, err := encodeString(v)
+		return d, true, err
+	case []byte:
+		d, err := encodeBytes(v)
+		return d, true, err
+	case Hash:
+		d, err := encodeFixedBytes(v[:], 32)
+		return d, false, err
+	case [32]byte:
+		d, err := encodeFixedBytes(v[:], 32)
+		return d, false, err
+	default:
+		rt := reflect.TypeOf(arg)
+		if rt != nil && rt.Kind() == reflect.Array {
+			// Fixed-size byte array bytesN (1 <= N <= 32): one static word.
+			if rt.Elem().Kind() == reflect.Uint8 && rt.Len() <= 32 {
+				rv := reflect.ValueOf(arg)
+				b := make([]byte, rv.Len())
+				reflect.Copy(reflect.ValueOf(b), rv)
+				d, err := encodeFixedBytes(b, len(b))
+				return d, false, err
+			}
+			// Fixed-size array [N]T of static elements: N inline static words.
+			rv := reflect.ValueOf(arg)
+			var out []byte
+			for i := 0; i < rv.Len(); i++ {
+				elemData, elemDynamic, err := encodeArg(rv.Index(i).Interface())
+				if err != nil {
+					return nil, false, fmt.Errorf("encoding array element %d: %w", i, err)
+				}
+				if elemDynamic {
+					return nil, false, fmt.Errorf("unsupported dynamic element in fixed-size array: %T", arg)
+				}
+				out = append(out, elemData...)
+			}
+			return out, false, nil
+		}
+		return nil, false, fmt.Errorf("unsupported argument type: %T", arg)
+	}
+}
+
+// ABI Decoding Implementation
 
 // decodeUint256 decodes a uint256 from 32 bytes to *big.Int
 func decodeUint256(data []byte) (*big.Int, error) {
@@ -286,15 +313,6 @@ func decodeUint256(data []byte) (*big.Int, error) {
 		return nil, errors.New("insufficient data for uint256")
 	}
 	return new(big.Int).SetBytes(data[:32]), nil
-}
-
-// mustDecodeUint256 decodes a uint256, panics on error
-func mustDecodeUint256(data []byte) *big.Int {
-	result, err := decodeUint256(data)
-	if err != nil {
-		panic(err)
-	}
-	return result
 }
 
 // decodeInt256 decodes a signed 256-bit integer from 32 bytes
@@ -321,88 +339,93 @@ func decodeInt256(data []byte) (*big.Int, error) {
 	return result, nil
 }
 
-// mustDecodeInt256 decodes a signed 256-bit integer, panics on error
-func mustDecodeInt256(data []byte) *big.Int {
-	result, err := decodeInt256(data)
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
 // decodeAddress decodes an address from 32 bytes
-func decodeAddress(data []byte) Address {
+func decodeAddress(data []byte) (Address, error) {
 	if len(data) < 32 {
-		panic("insufficient data for address")
+		return Address{}, errors.New("insufficient data for address")
 	}
 	var addr Address
 	copy(addr[:], data[12:32])
-	return addr
+	return addr, nil
 }
 
 // decodeBool decodes a boolean from 32 bytes
-func decodeBool(data []byte) bool {
+func decodeBool(data []byte) (bool, error) {
 	if len(data) < 32 {
-		panic("insufficient data for bool")
+		return false, errors.New("insufficient data for bool")
 	}
-	return data[31] != 0
+	return data[31] != 0, nil
 }
 
 // decodeBytes decodes dynamic bytes
-func decodeBytes(data []byte, offset int) ([]byte, int) {
+func decodeBytes(data []byte, offset int) ([]byte, int, error) {
 	if len(data) < offset+32 {
-		panic("insufficient data for bytes length")
+		return nil, 0, errors.New("insufficient data for bytes length")
 	}
-	lengthBig := mustDecodeUint256(data[offset : offset+32])
+	lengthBig, err := decodeUint256(data[offset : offset+32])
+	if err != nil {
+		return nil, 0, fmt.Errorf("decoding bytes length: %w", err)
+	}
 	if !lengthBig.IsUint64() {
-		panic("bytes length too large")
+		return nil, 0, errors.New("bytes length too large")
 	}
 	length := int(lengthBig.Uint64())
 	if len(data) < offset+32+length {
-		panic("insufficient data for bytes content")
+		return nil, 0, errors.New("insufficient data for bytes content")
 	}
 	result := make([]byte, length)
 	copy(result, data[offset+32:offset+32+length])
 	// Calculate next offset (padded to 32 bytes)
 	paddedLength := ((length + 31) / 32) * 32
-	return result, offset + 32 + paddedLength
+	return result, offset + 32 + paddedLength, nil
 }
 
 // decodeFixedBytes decodes fixed-size bytes (e.g., bytes32)
-func decodeFixedBytes(data []byte, size int) []byte {
+func decodeFixedBytes(data []byte, size int) ([]byte, error) {
 	if len(data) < 32 {
-		panic("insufficient data for fixed bytes")
+		return nil, errors.New("insufficient data for fixed bytes")
 	}
 	if size > 32 {
-		panic("fixed bytes size too large")
+		return nil, errors.New("fixed bytes size too large")
 	}
 	result := make([]byte, size)
 	copy(result, data[:size])
-	return result
+	return result, nil
 }
 
 // decode various fixed-size byte arrays
-func decodeBytes1(data []byte) [1]byte {
+func decodeBytes1(data []byte) ([1]byte, error) {
+	bytes, err := decodeFixedBytes(data, 1)
+	if err != nil {
+		return [1]byte{}, err
+	}
 	var result [1]byte
-	copy(result[:], decodeFixedBytes(data, 1))
-	return result
+	copy(result[:], bytes)
+	return result, nil
 }
 
-func decodeBytes32(data []byte) [32]byte {
+func decodeBytes32(data []byte) ([32]byte, error) {
+	bytes, err := decodeFixedBytes(data, 32)
+	if err != nil {
+		return [32]byte{}, err
+	}
 	var result [32]byte
-	copy(result[:], decodeFixedBytes(data, 32))
-	return result
+	copy(result[:], bytes)
+	return result, nil
 }
 
 // decodeArray decodes dynamic arrays
-func decodeArray(data []byte, offset int, elemDecoder func([]byte) interface{}) ([]interface{}, int) {
+func decodeArray(data []byte, offset int, elemDecoder func([]byte) (interface{}, error)) ([]interface{}, int, error) {
 	if len(data) < offset+32 {
-		panic("insufficient data for array length")
+		return nil, 0, errors.New("insufficient data for array length")
 	}
 
-	lengthBig := mustDecodeUint256(data[offset : offset+32])
+	lengthBig, err := decodeUint256(data[offset : offset+32])
+	if err != nil {
+		return nil, 0, fmt.Errorf("decoding array length: %w", err)
+	}
 	if !lengthBig.IsUint64() {
-		panic("array length too large")
+		return nil, 0, errors.New("array length too large")
 	}
 	length := int(lengthBig.Uint64())
 
@@ -411,340 +434,473 @@ func decodeArray(data []byte, offset int, elemDecoder func([]byte) interface{}) 
 
 	for i := 0; i < length; i++ {
 		if len(data) < currentOffset+32 {
-			panic(fmt.Sprintf("insufficient data for array element %d", i))
+			return nil, 0, fmt.Errorf("insufficient data for array element %d", i)
 		}
-		result[i] = elemDecoder(data[currentOffset : currentOffset+32])
+		elem, err := elemDecoder(data[currentOffset : currentOffset+32])
+		if err != nil {
+			return nil, 0, fmt.Errorf("decoding array element %d: %w", i, err)
+		}
+		result[i] = elem
 		currentOffset += 32
 	}
 
-	return result, currentOffset
+	return result, currentOffset, nil
 }
 
 // Array element decoders (internal use)
-func decodeUint256ArrayElement(data []byte) interface{} {
-	return mustDecodeUint256(data)
+func decodeUint256ArrayElement(data []byte) (interface{}, error) {
+	return decodeUint256(data)
 }
 
-func decodeInt256ArrayElement(data []byte) interface{} {
-	return mustDecodeInt256(data)
+func decodeInt256ArrayElement(data []byte) (interface{}, error) {
+	return decodeInt256(data)
 }
 
-func decodeAddressArrayElement(data []byte) interface{} {
+func decodeAddressArrayElement(data []byte) (interface{}, error) {
 	return decodeAddress(data)
 }
 
-func decodeBoolArrayElement(data []byte) interface{} {
+func decodeBoolArrayElement(data []byte) (interface{}, error) {
 	return decodeBool(data)
 }
 
+// readOffset reads a 32-byte ABI offset/length word at head position pos and
+// returns it as an int.
+func readOffset(data []byte, pos int) (int, error) {
+	if len(data) < pos+32 {
+		return 0, errors.New("insufficient data for offset pointer")
+	}
+	p, err := decodeUint256(data[pos : pos+32])
+	if err != nil {
+		return 0, fmt.Errorf("decoding offset pointer: %w", err)
+	}
+	if !p.IsUint64() {
+		return 0, errors.New("offset pointer too large")
+	}
+	return int(p.Uint64()), nil
+}
+
+// decodeStaticSliceAt decodes a dynamic array of static (32-byte) elements. pos
+// is the head position holding the offset pointer to the array data; dec decodes
+// a single element from its 32-byte word.
+func decodeStaticSliceAt[T any](data []byte, pos int, dec func([]byte) (T, error)) ([]T, error) {
+	arrPos, err := readOffset(data, pos)
+	if err != nil {
+		return nil, err
+	}
+	length, err := readOffset(data, arrPos)
+	if err != nil {
+		return nil, fmt.Errorf("decoding array length: %w", err)
+	}
+	out := make([]T, length)
+	cur := arrPos + 32
+	for i := 0; i < length; i++ {
+		if len(data) < cur+32 {
+			return nil, fmt.Errorf("insufficient data for array element %d", i)
+		}
+		v, err := dec(data[cur : cur+32])
+		if err != nil {
+			return nil, fmt.Errorf("decoding array element %d: %w", i, err)
+		}
+		out[i] = v
+		cur += 32
+	}
+	return out, nil
+}
+
+// decodeStaticFixedArray decodes size consecutive static (32-byte) elements
+// starting at pos into a slice; the caller copies it into the fixed-size [N]T
+// value. dec decodes a single element from its 32-byte word.
+func decodeStaticFixedArray[T any](data []byte, pos, size int, dec func([]byte) (T, error)) ([]T, error) {
+	out := make([]T, size)
+	for i := 0; i < size; i++ {
+		if len(data) < pos+(i+1)*32 {
+			return nil, fmt.Errorf("insufficient data for fixed array element %d", i)
+		}
+		v, err := dec(data[pos+i*32 : pos+(i+1)*32])
+		if err != nil {
+			return nil, fmt.Errorf("decoding fixed array element %d: %w", i, err)
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
 // decodeUint8 decodes a uint8 from 32 bytes
-func decodeUint8(data []byte) uint8 {
+func decodeUint8(data []byte) (uint8, error) {
 	if len(data) < 32 {
-		panic("insufficient data for uint8")
+		return 0, errors.New("insufficient data for uint8")
 	}
 	// Verify upper bytes are zero
 	for i := 0; i < 31; i++ {
 		if data[i] != 0 {
-			panic("invalid uint8 encoding")
+			return 0, errors.New("invalid uint8 encoding")
 		}
 	}
-	return data[31]
+	return data[31], nil
 }
 
 // decodeUint16 decodes a uint16 from 32 bytes
-func decodeUint16(data []byte) uint16 {
+func decodeUint16(data []byte) (uint16, error) {
 	if len(data) < 32 {
-		panic("insufficient data for uint16")
+		return 0, errors.New("insufficient data for uint16")
 	}
 	// Verify upper bytes are zero
 	for i := 0; i < 30; i++ {
 		if data[i] != 0 {
-			panic("invalid uint16 encoding")
+			return 0, errors.New("invalid uint16 encoding")
 		}
 	}
-	return uint16(data[30])<<8 | uint16(data[31])
+	return uint16(data[30])<<8 | uint16(data[31]), nil
 }
 
 // decodeUint32 decodes a uint32 from 32 bytes
-func decodeUint32(data []byte) uint32 {
+func decodeUint32(data []byte) (uint32, error) {
 	if len(data) < 32 {
-		panic("insufficient data for uint32")
+		return 0, errors.New("insufficient data for uint32")
 	}
 	// Verify upper bytes are zero
 	for i := 0; i < 28; i++ {
 		if data[i] != 0 {
-			panic("invalid uint32 encoding")
+			return 0, errors.New("invalid uint32 encoding")
 		}
 	}
 	var result uint32
 	for i := 28; i < 32; i++ {
 		result = (result << 8) | uint32(data[i])
 	}
-	return result
+	return result, nil
 }
 
 // decodeUint64 decodes a uint64 from 32 bytes
-func decodeUint64(data []byte) uint64 {
+func decodeUint64(data []byte) (uint64, error) {
 	if len(data) < 32 {
-		panic("insufficient data for uint64")
+		return 0, errors.New("insufficient data for uint64")
 	}
 	// Check if value exceeds uint64 range
 	for i := 0; i < 24; i++ {
 		if data[i] != 0 {
-			panic("value exceeds uint64 range")
+			return 0, errors.New("value exceeds uint64 range")
 		}
 	}
 	var result uint64
 	for i := 24; i < 32; i++ {
 		result = (result << 8) | uint64(data[i])
 	}
-	return result
+	return result, nil
 }
 
-// decodeInt64 decodes a int64 from 32 bytes
-func decodeInt64(data []byte) int64 {
+// decodeInt64 decodes an int64 from 32 bytes (ABI sign-extended big-endian).
+func decodeInt64(data []byte) (int64, error) {
 	if len(data) < 32 {
-		panic("insufficient data for int64")
+		return 0, errors.New("insufficient data for int64")
 	}
 
-	// Check if this is a negative number (MSB set)
+	// ABI sign-extension: bytes 0-23 must all match the sign byte
+	// (0x00 for non-negative, 0xFF for negative).
 	isNegative := data[0]&0x80 != 0
-
-	// Verify upper bytes are consistent (all 0s or all 1s for sign extension)
 	expectedByte := byte(0)
 	if isNegative {
 		expectedByte = 0xFF
 	}
-
 	for i := 0; i < 24; i++ {
 		if data[i] != expectedByte {
-			panic("value exceeds int64 range")
+			return 0, errors.New("value exceeds int64 range")
 		}
 	}
 
+	// Assemble the int64 from the last 8 bytes.
+	// Because data[24..31] already hold the correct two's-complement
+	// representation, no further sign extension is needed.
 	var result int64
 	for i := 24; i < 32; i++ {
 		result = (result << 8) | int64(data[i])
 	}
-
-	// Sign extend if necessary
-	if isNegative {
-		result |= ^((1 << 32) - 1) // Set upper 32 bits
-	}
-
-	return result
+	return result, nil
 }
 
 // decodeHash decodes a 32-byte hash
-func decodeHash(data []byte) Hash {
+func decodeHash(data []byte) (Hash, error) {
 	if len(data) < 32 {
-		panic("insufficient data for hash")
+		return Hash{}, errors.New("insufficient data for hash")
 	}
 	var hash Hash
 	copy(hash[:], data[:32])
-	return hash
+	return hash, nil
 }
 
 // decodeString decodes a string from dynamic bytes
-func decodeString(data []byte, offset int) (string, int) {
-	bytes, nextOffset := decodeBytes(data, offset)
-	return string(bytes), nextOffset
-}
-
-// decodeStruct decodes a Struct struct from ABI-encoded data
-func decodeStruct(data []byte, offset int) (Struct, int) {
-	result := Struct{}
-	currentOffset := offset
-	if len(data) < currentOffset+32 {
-		panic("insufficient data for Struct.BoolField")
-	}
-	result.BoolField = decodeBool(data[currentOffset : currentOffset+32])
-	currentOffset += 32
-	if len(data) < currentOffset+32 {
-		panic("insufficient data for Struct.Uint8Field")
-	}
-	result.Uint8Field = decodeUint8(data[currentOffset : currentOffset+32])
-	currentOffset += 32
-	if len(data) < currentOffset+32 {
-		panic("insufficient data for Struct.Uint256Field")
-	}
-	result.Uint256Field = mustDecodeUint256(data[currentOffset : currentOffset+32])
-	currentOffset += 32
-	if len(data) < currentOffset+32 {
-		panic("insufficient data for Struct.Int256Field")
-	}
-	result.Int256Field = mustDecodeInt256(data[currentOffset : currentOffset+32])
-	currentOffset += 32
-	if len(data) < currentOffset+32 {
-		panic("insufficient data for Struct.AddressField")
-	}
-	result.AddressField = decodeAddress(data[currentOffset : currentOffset+32])
-	currentOffset += 32
-	if len(data) < currentOffset+32 {
-		panic("insufficient data for Struct.Bytes32Field")
-	}
-	result.Bytes32Field = decodeBytes32(data[currentOffset : currentOffset+32])
-	currentOffset += 32
-	var nextOffset int
-	result.StringField, nextOffset = decodeString(data, currentOffset)
-	currentOffset = nextOffset
-	return result, currentOffset
-}
-
-// Bytecode contains the contract creation bytecode
-var Bytecode = HexData("0x608060405234801561001057600080fd5b506139d7806100206000396000f3fe608060405234801561001057600080fd5b50600436106102325760003560e01c8063891115c311610130578063c8b4acd8116100b8578063e4c6857f1161007c578063e4c6857f14610734578063efe4d60714610764578063f07587f814610794578063f9856426146107c4578063fa5ffd62146107f457610232565b8063c8b4acd81461067a578063cf5cd64f146106aa578063d7b7e6d3146106da578063d90ecf31146106fa578063e36453af1461070457610232565b80639d9c433f116100ff5780639d9c433f146105b05780639df0e25a146105e05780639f471a10146105ea578063b21859c01461061a578063bfa2937a1461064a57610232565b8063891115c3146104f05780638fec39051461052057806395ccfc7c146105505780639a34832d1461058057610232565b806352ad478f116101be5780636fcf090b116101825780636fcf090b146104445780638240db741461047457806382ac4d4f1461047e57806384474506146104ae5780638875b5fe146104d057610232565b806352ad478f146103b057806352fc0936146103e05780635760d9a0146103ea57806358f7e471146103f4578063648a1e8b1461041457610232565b80630d7e2fce116102055780630d7e2fce146102e6578063114a95f61461031657806315c34a1a146103465780631d2bdaa4146103765780632b825d111461038057610232565b8063023c47d614610237578063092bb05b1461025657806309631a0e146102865780630cbda481146102b6575b600080fd5b61023f610824565b60405161024d929190611a2e565b60405180910390f35b610270600480360381019061026b9190611ab2565b610a83565b60405161027d9190611aee565b60405180910390f35b6102a0600480360381019061029b9190611c7d565b610a8d565b6040516102ad9190611d75565b60405180910390f35b6102d060048036038101906102cb9190611e86565b610a97565b6040516102dd9190611f7e565b60405180910390f35b61030060048036038101906102fb9190612055565b610aa1565b60405161030d91906120e8565b60405180910390f35b610330600480360381019061032b9190612162565b610aab565b60405161033d9190612208565b60405180910390f35b610360600480360381019061035b91906122e6565b610b18565b60405161036d91906123de565b60405180910390f35b61037e610b22565b005b61039a600480360381019061039591906124dd565b610c90565b6040516103a791906125a6565b60405180910390f35b6103ca60048036038101906103c59190612684565b610ca0565b6040516103d7919061277c565b60405180910390f35b6103e8610caa565b005b6103f2610ce5565b005b6103fc610ddc565b60405161040b9392919061279e565b60405180910390f35b61042e60048036038101906104299190612816565b611079565b60405161043b9190612852565b60405180910390f35b61045e60048036038101906104599190612a28565b611083565b60405161046b9190612a71565b60405180910390f35b61047c61108d565b005b61049860048036038101906104939190612a93565b6110f3565b6040516104a59190612acf565b60405180910390f35b6104b66110fd565b6040516104c7959493929190612b08565b60405180910390f35b6104d8611187565b6040516104e793929190612b62565b60405180910390f35b61050a60048036038101906105059190612bd2565b6111fa565b6040516105179190612c0e565b60405180910390f35b61053a60048036038101906105359190612c29565b611204565b6040516105479190612c72565b60405180910390f35b61056a60048036038101906105659190612cd4565b611214565b6040516105779190612d10565b60405180910390f35b61059a60048036038101906105959190612dcc565b61121e565b6040516105a79190612e6a565b60405180910390f35b6105ca60048036038101906105c59190612ee4565b611228565b6040516105d79190612f20565b60405180910390f35b6105e8611232565b005b61060460048036038101906105ff9190612f75565b611430565b6040516106119190612fb1565b60405180910390f35b610634600480360381019061062f9190613005565b61143a565b6040516106419190613041565b60405180910390f35b610664600480360381019061065f919061310d565b611444565b60405161067191906131be565b60405180910390f35b610694600480360381019061068f919061328a565b611454565b6040516106a1919061333b565b60405180910390f35b6106c460048036038101906106bf9190613356565b611464565b6040516106d19190613383565b60405180910390f35b6106e261146e565b6040516106f19392919061339e565b60405180910390f35b610702611567565b005b61071e60048036038101906107199190613426565b6115c9565b60405161072b9190613462565b60405180910390f35b61074e600480360381019061074991906134b6565b6115d3565b60405161075b91906134f2565b60405180910390f35b61077e6004803603810190610779919061350d565b6115dd565b60405161078b9190612208565b60405180910390f35b6107ae60048036038101906107a9919061353a565b6115e7565b6040516107bb9190613567565b60405180910390f35b6107de60048036038101906107d99190613582565b6115f1565b6040516107eb9190613567565b60405180910390f35b61080e60048036038101906108099190613629565b611616565b60405161081b9190613665565b60405180910390f35b61082c611620565b60606040518060e0016040528060011515815260200160ff8016815260200163075bcd1581526020017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffc521974f815260200173aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa73ffffffffffffffffffffffffffffffffffffffff1681526020017f9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb65881526020016040518060400160405280600b81526020017f73747275637420746573740000000000000000000000000000000000000000008152508152509150600267ffffffffffffffff81111561092757610926611b0e565b5b60405190808252806020026020018201604052801561096057816020015b61094d611620565b8152602001906001900390816109455790505b509050818160008151811061097857610977613680565b5b60200260200101819052506040518060e00160405280600015158152602001608060ff168152602001633b9ac9ff81526020017ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff9609439815260200173bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb73ffffffffffffffffffffffffffffffffffffffff1681526020017f4da432f1ecd4c0ac028ebde3a3f78510a21d54087b161590a63080d33b702b8d81526020016040518060400160405280600d81526020017f7365636f6e64207374727563740000000000000000000000000000000000000081525081525081600181518110610a7457610a73613680565b5b60200260200101819052509091565b6000819050919050565b6060819050919050565b6060819050919050565b6060819050919050565b6000858015610aba5750600085115b8015610ac7575060008414155b8015610b005750600073ffffffffffffffffffffffffffffffffffffffff168373ffffffffffffffffffffffffffffffffffffffff1614155b8015610b0d575060008251115b905095945050505050565b6060819050919050565b6000600267ffffffffffffffff811115610b3f57610b3e611b0e565b5b604051908082528060200260200182016040528015610b6d5781602001602082028036833780820191505090505b509050600181600081518110610b8657610b85613680565b5b602002602001018181525050600281600181518110610ba857610ba7613680565b5b6020026020010181815250506000600167ffffffffffffffff811115610bd157610bd0611b0e565b5b604051908082528060200260200182016040528015610bff5781602001602082028036833780820191505090505b5090503381600081518110610c1757610c16613680565b5b602002602001019073ffffffffffffffffffffffffffffffffffffffff16908173ffffffffffffffffffffffffffffffffffffffff168152505081816040517f754c3513000000000000000000000000000000000000000000000000000000008152600401610c879291906136af565b60405180910390fd5b610c9861167b565b819050919050565b6060819050919050565b6040517ff9006398000000000000000000000000000000000000000000000000000000008152600401610cdc90613732565b60405180910390fd5b60006040518060e00160405280600115158152602001602a60ff16815260200161303981526020017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff2bcf81526020013373ffffffffffffffffffffffffffffffffffffffff168152602001600143610d5c9190613781565b4081526020016040518060400160405280600c81526020017f6572726f72207374727563740000000000000000000000000000000000000000815250815250905080426040517f8b7e4126000000000000000000000000000000000000000000000000000000008152600401610dd39291906137b5565b60405180910390fd5b6060806060600367ffffffffffffffff811115610dfc57610dfb611b0e565b5b604051908082528060200260200182016040528015610e2a5781602001602082028036833780820191505090505b509250606483600081518110610e4357610e42613680565b5b60200260200101818152505060c883600181518110610e6557610e64613680565b5b60200260200101818152505061012c83600281518110610e8857610e87613680565b5b602002602001018181525050600267ffffffffffffffff811115610eaf57610eae611b0e565b5b604051908082528060200260200182016040528015610edd5781602001602082028036833780820191505090505b5091507fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff9c82600081518110610f1557610f14613680565b5b6020026020010181815250507fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff3882600181518110610f5657610f55613680565b5b602002602001018181525050600267ffffffffffffffff811115610f7d57610f7c611b0e565b5b604051908082528060200260200182016040528015610fab5781602001602082028036833780820191505090505b50905073111111111111111111111111111111111111111181600081518110610fd757610fd6613680565b5b602002602001019073ffffffffffffffffffffffffffffffffffffffff16908173ffffffffffffffffffffffffffffffffffffffff16815250507322222222222222222222222222222222222222228160018151811061103a57611039613680565b5b602002602001019073ffffffffffffffffffffffffffffffffffffffff16908173ffffffffffffffffffffffffffffffffffffffff1681525050909192565b6000819050919050565b6060819050919050565b6101947fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff3360006040517f0b7b086b0000000000000000000000000000000000000000000000000000000081526004016110ea9493929190613865565b60405180910390fd5b6000819050919050565b600080600080606060016130397fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe57b7312345678901234567890123456789012345678906040518060400160405280600b81526020017f68656c6c6f20776f726c64000000000000000000000000000000000000000000815250945094509450945094509091929394565b60008060007fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f8000000000000000000000000000000000000000000000000000000000000000925092509250909192565b6000819050919050565b61120c611620565b819050919050565b6000819050919050565b6060819050919050565b6000819050919050565b6000600267ffffffffffffffff81111561124f5761124e611b0e565b5b60405190808252806020026020018201604052801561127d5781602001602082028036833780820191505090505b50905060648160008151811061129657611295613680565b5b60200260200101818152505060c8816001815181106112b8576112b7613680565b5b6020026020010181815250506000600167ffffffffffffffff8111156112e1576112e0611b0e565b5b60405190808252806020026020018201604052801561130f5781602001602082028036833780820191505090505b5090507ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed48160008151811061134757611346613680565b5b6020026020010181815250506000600167ffffffffffffffff8111156113705761136f611b0e565b5b60405190808252806020026020018201604052801561139e5781602001602082028036833780820191505090505b50905033816000815181106113b6576113b5613680565b5b602002602001019073ffffffffffffffffffffffffffffffffffffffff16908173ffffffffffffffffffffffffffffffffffffffff16815250507f85622bbf72d7da2d2874177aadd8b5de19859ee33997cca5b056591a2419f1e38383836040516114239392919061279e565b60405180910390a1505050565b6000819050919050565b6000819050919050565b61144c61169d565b819050919050565b61145c6116bf565b819050919050565b6000819050919050565b6060806060600067ffffffffffffffff81111561148e5761148d611b0e565b5b6040519080825280602002602001820160405280156114bc5781602001602082028036833780820191505090505b50600067ffffffffffffffff8111156114d8576114d7611b0e565b5b6040519080825280602002602001820160405280156115065781602001602082028036833780820191505090505b50600067ffffffffffffffff81111561152257611521611b0e565b5b60405190808252806020026020018201604052801561155b57816020015b611548611620565b8152602001906001900390816115405790505b50925092509250909192565b613039600115157ffec351d1313ef8d0483489992e601052b6feda5a504be55e7f037a4e8e2739197fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe57b336040516115bf929190613931565b60405180910390a3565b6000819050919050565b6000819050919050565b6000819050919050565b6000819050919050565b6000815183518551611603919061396d565b61160d919061396d565b90509392505050565b6000819050919050565b6040518060e00160405280600015158152602001600060ff1681526020016000815260200160008152602001600073ffffffffffffffffffffffffffffffffffffffff16815260200160008019168152602001606081525090565b6040518060800160405280600490602082028036833780820191505090505090565b6040518060400160405280600290602082028036833780820191505090505090565b6040518060600160405280600390602082028036833780820191505090505090565b60008115159050919050565b6116f6816116e1565b82525050565b600060ff82169050919050565b611712816116fc565b82525050565b6000819050919050565b61172b81611718565b82525050565b6000819050919050565b61174481611731565b82525050565b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b60006117758261174a565b9050919050565b6117858161176a565b82525050565b6000819050919050565b61179e8161178b565b82525050565b600081519050919050565b600082825260208201905092915050565b60005b838110156117de5780820151818401526020810190506117c3565b60008484015250505050565b6000601f19601f8301169050919050565b6000611806826117a4565b61181081856117af565b93506118208185602086016117c0565b611829816117ea565b840191505092915050565b600060e08301600083015161184c60008601826116ed565b50602083015161185f6020860182611709565b5060408301516118726040860182611722565b506060830151611885606086018261173b565b506080830151611898608086018261177c565b5060a08301516118ab60a0860182611795565b5060c083015184820360c08601526118c382826117fb565b9150508091505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b600060e08301600083015161191460008601826116ed565b5060208301516119276020860182611709565b50604083015161193a6040860182611722565b50606083015161194d606086018261173b565b506080830151611960608086018261177c565b5060a083015161197360a0860182611795565b5060c083015184820360c086015261198b82826117fb565b9150508091505092915050565b60006119a483836118fc565b905092915050565b6000602082019050919050565b60006119c4826118d0565b6119ce81856118db565b9350836020820285016119e0856118ec565b8060005b85811015611a1c57848403895281516119fd8582611998565b9450611a08836119ac565b925060208a019950506001810190506119e4565b50829750879550505050505092915050565b60006040820190508181036000830152611a488185611834565b90508181036020830152611a5c81846119b9565b90509392505050565b6000604051905090565b600080fd5b600080fd5b60008160030b9050919050565b611a8f81611a79565b8114611a9a57600080fd5b50565b600081359050611aac81611a86565b92915050565b600060208284031215611ac857611ac7611a6f565b5b6000611ad684828501611a9d565b91505092915050565b611ae881611a79565b82525050565b6000602082019050611b036000830184611adf565b92915050565b600080fd5b7f4e487b7100000000000000000000000000000000000000000000000000000000600052604160045260246000fd5b611b46826117ea565b810181811067ffffffffffffffff82111715611b6557611b64611b0e565b5b80604052505050565b6000611b78611a65565b9050611b848282611b3d565b919050565b600067ffffffffffffffff821115611ba457611ba3611b0e565b5b602082029050602081019050919050565b600080fd5b611bc381611731565b8114611bce57600080fd5b50565b600081359050611be081611bba565b92915050565b6000611bf9611bf484611b89565b611b6e565b90508083825260208201905060208402830185811115611c1c57611c1b611bb5565b5b835b81811015611c455780611c318882611bd1565b845260208401935050602081019050611c1e565b5050509392505050565b600082601f830112611c6457611c63611b09565b5b8135611c74848260208601611be6565b91505092915050565b600060208284031215611c9357611c92611a6f565b5b600082013567ffffffffffffffff811115611cb157611cb0611a74565b5b611cbd84828501611c4f565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b6000611cfe838361173b565b60208301905092915050565b6000602082019050919050565b6000611d2282611cc6565b611d2c8185611cd1565b9350611d3783611ce2565b8060005b83811015611d68578151611d4f8882611cf2565b9750611d5a83611d0a565b925050600181019050611d3b565b5085935050505092915050565b60006020820190508181036000830152611d8f8184611d17565b905092915050565b600067ffffffffffffffff821115611db257611db1611b0e565b5b602082029050602081019050919050565b611dcc8161176a565b8114611dd757600080fd5b50565b600081359050611de981611dc3565b92915050565b6000611e02611dfd84611d97565b611b6e565b90508083825260208201905060208402830185811115611e2557611e24611bb5565b5b835b81811015611e4e5780611e3a8882611dda565b845260208401935050602081019050611e27565b5050509392505050565b600082601f830112611e6d57611e6c611b09565b5b8135611e7d848260208601611def565b91505092915050565b600060208284031215611e9c57611e9b611a6f565b5b600082013567ffffffffffffffff811115611eba57611eb9611a74565b5b611ec684828501611e58565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b6000611f07838361177c565b60208301905092915050565b6000602082019050919050565b6000611f2b82611ecf565b611f358185611eda565b9350611f4083611eeb565b8060005b83811015611f71578151611f588882611efb565b9750611f6383611f13565b925050600181019050611f44565b5085935050505092915050565b60006020820190508181036000830152611f988184611f20565b905092915050565b600080fd5b600067ffffffffffffffff821115611fc057611fbf611b0e565b5b611fc9826117ea565b9050602081019050919050565b82818337600083830152505050565b6000611ff8611ff384611fa5565b611b6e565b90508281526020810184848401111561201457612013611fa0565b5b61201f848285611fd6565b509392505050565b600082601f83011261203c5761203b611b09565b5b813561204c848260208601611fe5565b91505092915050565b60006020828403121561206b5761206a611a6f565b5b600082013567ffffffffffffffff81111561208957612088611a74565b5b61209584828501612027565b91505092915050565b600082825260208201905092915050565b60006120ba826117a4565b6120c4818561209e565b93506120d48185602086016117c0565b6120dd816117ea565b840191505092915050565b6000602082019050818103600083015261210281846120af565b905092915050565b612113816116e1565b811461211e57600080fd5b50565b6000813590506121308161210a565b92915050565b61213f81611718565b811461214a57600080fd5b50565b60008135905061215c81612136565b92915050565b600080600080600060a0868803121561217e5761217d611a6f565b5b600061218c88828901612121565b955050602061219d8882890161214d565b94505060406121ae88828901611bd1565b93505060606121bf88828901611dda565b925050608086013567ffffffffffffffff8111156121e0576121df611a74565b5b6121ec88828901612027565b9150509295509295909350565b612202816116e1565b82525050565b600060208201905061221d60008301846121f9565b92915050565b600067ffffffffffffffff82111561223e5761223d611b0e565b5b602082029050602081019050919050565b600061226261225d84612223565b611b6e565b9050808382526020820190506020840283018581111561228557612284611bb5565b5b835b818110156122ae578061229a8882612121565b845260208401935050602081019050612287565b5050509392505050565b600082601f8301126122cd576122cc611b09565b5b81356122dd84826020860161224f565b91505092915050565b6000602082840312156122fc576122fb611a6f565b5b600082013567ffffffffffffffff81111561231a57612319611a74565b5b612326848285016122b8565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b600061236783836116ed565b60208301905092915050565b6000602082019050919050565b600061238b8261232f565b612395818561233a565b93506123a08361234b565b8060005b838110156123d15781516123b8888261235b565b97506123c383612373565b9250506001810190506123a4565b5085935050505092915050565b600060208201905081810360008301526123f88184612380565b905092915050565b600067ffffffffffffffff82111561241b5761241a611b0e565b5b602082029050919050565b61242f8161178b565b811461243a57600080fd5b50565b60008135905061244c81612426565b92915050565b600061246561246084612400565b611b6e565b9050806020840283018581111561247f5761247e611bb5565b5b835b818110156124a85780612494888261243d565b845260208401935050602081019050612481565b5050509392505050565b600082601f8301126124c7576124c6611b09565b5b60046124d4848285612452565b91505092915050565b6000608082840312156124f3576124f2611a6f565b5b6000612501848285016124b2565b91505092915050565b600060049050919050565b600081905092915050565b6000819050919050565b60006125368383611795565b60208301905092915050565b6000602082019050919050565b6125588161250a565b6125628184612515565b925061256d82612520565b8060005b8381101561259e578151612585878261252a565b965061259083612542565b925050600181019050612571565b505050505050565b60006080820190506125bb600083018461254f565b92915050565b600067ffffffffffffffff8211156125dc576125db611b0e565b5b602082029050602081019050919050565b60006126006125fb846125c1565b611b6e565b9050808382526020820190506020840283018581111561262357612622611bb5565b5b835b8181101561264c5780612638888261214d565b845260208401935050602081019050612625565b5050509392505050565b600082601f83011261266b5761266a611b09565b5b813561267b8482602086016125ed565b91505092915050565b60006020828403121561269a57612699611a6f565b5b600082013567ffffffffffffffff8111156126b8576126b7611a74565b5b6126c484828501612656565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b60006127058383611722565b60208301905092915050565b6000602082019050919050565b6000612729826126cd565b61273381856126d8565b935061273e836126e9565b8060005b8381101561276f57815161275688826126f9565b975061276183612711565b925050600181019050612742565b5085935050505092915050565b60006020820190508181036000830152612796818461271e565b905092915050565b600060608201905081810360008301526127b8818661271e565b905081810360208301526127cc8185611d17565b905081810360408301526127e08184611f20565b9050949350505050565b6127f3816116fc565b81146127fe57600080fd5b50565b600081359050612810816127ea565b92915050565b60006020828403121561282c5761282b611a6f565b5b600061283a84828501612801565b91505092915050565b61284c816116fc565b82525050565b60006020820190506128676000830184612843565b92915050565b600067ffffffffffffffff82111561288857612887611b0e565b5b602082029050602081019050919050565b600080fd5b600080fd5b600060e082840312156128b9576128b8612899565b5b6128c360e0611b6e565b905060006128d384828501612121565b60008301525060206128e784828501612801565b60208301525060406128fb8482850161214d565b604083015250606061290f84828501611bd1565b606083015250608061292384828501611dda565b60808301525060a06129378482850161243d565b60a08301525060c082013567ffffffffffffffff81111561295b5761295a61289e565b5b61296784828501612027565b60c08301525092915050565b60006129866129818461286d565b611b6e565b905080838252602082019050602084028301858111156129a9576129a8611bb5565b5b835b818110156129f057803567ffffffffffffffff8111156129ce576129cd611b09565b5b8086016129db89826128a3565b855260208501945050506020810190506129ab565b5050509392505050565b600082601f830112612a0f57612a0e611b09565b5b8135612a1f848260208601612973565b91505092915050565b600060208284031215612a3e57612a3d611a6f565b5b600082013567ffffffffffffffff811115612a5c57612a5b611a74565b5b612a68848285016129fa565b91505092915050565b60006020820190508181036000830152612a8b81846119b9565b905092915050565b600060208284031215612aa957612aa8611a6f565b5b6000612ab784828501611dda565b91505092915050565b612ac98161176a565b82525050565b6000602082019050612ae46000830184612ac0565b92915050565b612af381611718565b82525050565b612b0281611731565b82525050565b600060a082019050612b1d60008301886121f9565b612b2a6020830187612aea565b612b376040830186612af9565b612b446060830185612ac0565b8181036080830152612b5681846120af565b90509695505050505050565b6000606082019050612b776000830186612aea565b612b846020830185612af9565b612b916040830184612af9565b949350505050565b60008160010b9050919050565b612baf81612b99565b8114612bba57600080fd5b50565b600081359050612bcc81612ba6565b92915050565b600060208284031215612be857612be7611a6f565b5b6000612bf684828501612bbd565b91505092915050565b612c0881612b99565b82525050565b6000602082019050612c236000830184612bff565b92915050565b600060208284031215612c3f57612c3e611a6f565b5b600082013567ffffffffffffffff811115612c5d57612c5c611a74565b5b612c69848285016128a3565b91505092915050565b60006020820190508181036000830152612c8c8184611834565b905092915050565b600067ffffffffffffffff82169050919050565b612cb181612c94565b8114612cbc57600080fd5b50565b600081359050612cce81612ca8565b92915050565b600060208284031215612cea57612ce9611a6f565b5b6000612cf884828501612cbf565b91505092915050565b612d0a81612c94565b82525050565b6000602082019050612d256000830184612d01565b92915050565b600067ffffffffffffffff821115612d4657612d45611b0e565b5b612d4f826117ea565b9050602081019050919050565b6000612d6f612d6a84612d2b565b611b6e565b905082815260208101848484011115612d8b57612d8a611fa0565b5b612d96848285611fd6565b509392505050565b600082601f830112612db357612db2611b09565b5b8135612dc3848260208601612d5c565b91505092915050565b600060208284031215612de257612de1611a6f565b5b600082013567ffffffffffffffff811115612e0057612dff611a74565b5b612e0c84828501612d9e565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000612e3c82612e15565b612e468185612e20565b9350612e568185602086016117c0565b612e5f816117ea565b840191505092915050565b60006020820190508181036000830152612e848184612e31565b905092915050565b60007fff0000000000000000000000000000000000000000000000000000000000000082169050919050565b612ec181612e8c565b8114612ecc57600080fd5b50565b600081359050612ede81612eb8565b92915050565b600060208284031215612efa57612ef9611a6f565b5b6000612f0884828501612ecf565b91505092915050565b612f1a81612e8c565b82525050565b6000602082019050612f356000830184612f11565b92915050565b600061ffff82169050919050565b612f5281612f3b565b8114612f5d57600080fd5b50565b600081359050612f6f81612f49565b92915050565b600060208284031215612f8b57612f8a611a6f565b5b6000612f9984828501612f60565b91505092915050565b612fab81612f3b565b82525050565b6000602082019050612fc66000830184612fa2565b92915050565b60008160000b9050919050565b612fe281612fcc565b8114612fed57600080fd5b50565b600081359050612fff81612fd9565b92915050565b60006020828403121561301b5761301a611a6f565b5b600061302984828501612ff0565b91505092915050565b61303b81612fcc565b82525050565b60006020820190506130566000830184613032565b92915050565b600067ffffffffffffffff82111561307757613076611b0e565b5b602082029050919050565b60006130956130908461305c565b611b6e565b905080602084028301858111156130af576130ae611bb5565b5b835b818110156130d857806130c48882611dda565b8452602084019350506020810190506130b1565b5050509392505050565b600082601f8301126130f7576130f6611b09565b5b6002613104848285613082565b91505092915050565b60006040828403121561312357613122611a6f565b5b6000613131848285016130e2565b91505092915050565b600060029050919050565b600081905092915050565b6000819050919050565b6000602082019050919050565b6131708161313a565b61317a8184613145565b925061318582613150565b8060005b838110156131b657815161319d8782611efb565b96506131a88361315a565b925050600181019050613189565b505050505050565b60006040820190506131d36000830184613167565b92915050565b600067ffffffffffffffff8211156131f4576131f3611b0e565b5b602082029050919050565b600061321261320d846131d9565b611b6e565b9050806020840283018581111561322c5761322b611bb5565b5b835b818110156132555780613241888261214d565b84526020840193505060208101905061322e565b5050509392505050565b600082601f83011261327457613273611b09565b5b60036132818482856131ff565b91505092915050565b6000606082840312156132a05761329f611a6f565b5b60006132ae8482850161325f565b91505092915050565b600060039050919050565b600081905092915050565b6000819050919050565b6000602082019050919050565b6132ed816132b7565b6132f781846132c2565b9250613302826132cd565b8060005b8381101561333357815161331a87826126f9565b9650613325836132d7565b925050600181019050613306565b505050505050565b600060608201905061335060008301846132e4565b92915050565b60006020828403121561336c5761336b611a6f565b5b600061337a84828501611bd1565b91505092915050565b60006020820190506133986000830184612af9565b92915050565b600060608201905081810360008301526133b8818661271e565b905081810360208301526133cc8185611f20565b905081810360408301526133e081846119b9565b9050949350505050565b600063ffffffff82169050919050565b613403816133ea565b811461340e57600080fd5b50565b600081359050613420816133fa565b92915050565b60006020828403121561343c5761343b611a6f565b5b600061344a84828501613411565b91505092915050565b61345c816133ea565b82525050565b60006020820190506134776000830184613453565b92915050565b60008160070b9050919050565b6134938161347d565b811461349e57600080fd5b50565b6000813590506134b08161348a565b92915050565b6000602082840312156134cc576134cb611a6f565b5b60006134da848285016134a1565b91505092915050565b6134ec8161347d565b82525050565b600060208201905061350760008301846134e3565b92915050565b60006020828403121561352357613522611a6f565b5b600061353184828501612121565b91505092915050565b6000602082840312156135505761354f611a6f565b5b600061355e8482850161214d565b91505092915050565b600060208201905061357c6000830184612aea565b92915050565b60008060006060848603121561359b5761359a611a6f565b5b600084013567ffffffffffffffff8111156135b9576135b8611a74565b5b6135c586828701612656565b935050602084013567ffffffffffffffff8111156135e6576135e5611a74565b5b6135f286828701611e58565b925050604084013567ffffffffffffffff81111561361357613612611a74565b5b61361f868287016129fa565b9150509250925092565b60006020828403121561363f5761363e611a6f565b5b600061364d8482850161243d565b91505092915050565b61365f8161178b565b82525050565b600060208201905061367a6000830184613656565b92915050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052603260045260246000fd5b600060408201905081810360008301526136c9818561271e565b905081810360208301526136dd8184611f20565b90509392505050565b7f5468697320697320612073696d706c65206572726f7200000000000000000000600082015250565b600061371c60168361209e565b9150613727826136e6565b602082019050919050565b6000602082019050818103600083015261374b8161370f565b9050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052601160045260246000fd5b600061378c82611718565b915061379783611718565b92508282039050818111156137af576137ae613752565b5b92915050565b600060408201905081810360008301526137cf8185611834565b90506137de6020830184612aea565b9392505050565b6000819050919050565b6000819050919050565b600061381461380f61380a846137e5565b6137ef565b611718565b9050919050565b613824816137f9565b82525050565b6000819050919050565b600061384f61384a6138458461382a565b6137ef565b611731565b9050919050565b61385f81613834565b82525050565b600060808201905061387a600083018761381b565b6138876020830186613856565b6138946040830185612ac0565b6138a160608301846121f9565b95945050505050565b6000819050919050565b60006138cf6138ca6138c5846138aa565b6137ef565b611731565b9050919050565b6138df816138b4565b82525050565b7f6576656e74207465737400000000000000000000000000000000000000000000600082015250565b600061391b600a8361209e565b9150613926826138e5565b602082019050919050565b600060608201905061394660008301856138d6565b6139536020830184612ac0565b81810360408301526139648161390e565b90509392505050565b600061397882611718565b915061398383611718565b925082820190508082111561399b5761399a613752565b5b9291505056fea2646970667358221220768d676a75c575a5228e36584f190ea4057e3b836d240280a4860434f42b1e9064736f6c63430008140033")
-
-// DeployedBytecode contains the contract runtime bytecode
-var DeployedBytecode = HexData("0x608060405234801561001057600080fd5b50600436106102325760003560e01c8063891115c311610130578063c8b4acd8116100b8578063e4c6857f1161007c578063e4c6857f14610734578063efe4d60714610764578063f07587f814610794578063f9856426146107c4578063fa5ffd62146107f457610232565b8063c8b4acd81461067a578063cf5cd64f146106aa578063d7b7e6d3146106da578063d90ecf31146106fa578063e36453af1461070457610232565b80639d9c433f116100ff5780639d9c433f146105b05780639df0e25a146105e05780639f471a10146105ea578063b21859c01461061a578063bfa2937a1461064a57610232565b8063891115c3146104f05780638fec39051461052057806395ccfc7c146105505780639a34832d1461058057610232565b806352ad478f116101be5780636fcf090b116101825780636fcf090b146104445780638240db741461047457806382ac4d4f1461047e57806384474506146104ae5780638875b5fe146104d057610232565b806352ad478f146103b057806352fc0936146103e05780635760d9a0146103ea57806358f7e471146103f4578063648a1e8b1461041457610232565b80630d7e2fce116102055780630d7e2fce146102e6578063114a95f61461031657806315c34a1a146103465780631d2bdaa4146103765780632b825d111461038057610232565b8063023c47d614610237578063092bb05b1461025657806309631a0e146102865780630cbda481146102b6575b600080fd5b61023f610824565b60405161024d929190611a2e565b60405180910390f35b610270600480360381019061026b9190611ab2565b610a83565b60405161027d9190611aee565b60405180910390f35b6102a0600480360381019061029b9190611c7d565b610a8d565b6040516102ad9190611d75565b60405180910390f35b6102d060048036038101906102cb9190611e86565b610a97565b6040516102dd9190611f7e565b60405180910390f35b61030060048036038101906102fb9190612055565b610aa1565b60405161030d91906120e8565b60405180910390f35b610330600480360381019061032b9190612162565b610aab565b60405161033d9190612208565b60405180910390f35b610360600480360381019061035b91906122e6565b610b18565b60405161036d91906123de565b60405180910390f35b61037e610b22565b005b61039a600480360381019061039591906124dd565b610c90565b6040516103a791906125a6565b60405180910390f35b6103ca60048036038101906103c59190612684565b610ca0565b6040516103d7919061277c565b60405180910390f35b6103e8610caa565b005b6103f2610ce5565b005b6103fc610ddc565b60405161040b9392919061279e565b60405180910390f35b61042e60048036038101906104299190612816565b611079565b60405161043b9190612852565b60405180910390f35b61045e60048036038101906104599190612a28565b611083565b60405161046b9190612a71565b60405180910390f35b61047c61108d565b005b61049860048036038101906104939190612a93565b6110f3565b6040516104a59190612acf565b60405180910390f35b6104b66110fd565b6040516104c7959493929190612b08565b60405180910390f35b6104d8611187565b6040516104e793929190612b62565b60405180910390f35b61050a60048036038101906105059190612bd2565b6111fa565b6040516105179190612c0e565b60405180910390f35b61053a60048036038101906105359190612c29565b611204565b6040516105479190612c72565b60405180910390f35b61056a60048036038101906105659190612cd4565b611214565b6040516105779190612d10565b60405180910390f35b61059a60048036038101906105959190612dcc565b61121e565b6040516105a79190612e6a565b60405180910390f35b6105ca60048036038101906105c59190612ee4565b611228565b6040516105d79190612f20565b60405180910390f35b6105e8611232565b005b61060460048036038101906105ff9190612f75565b611430565b6040516106119190612fb1565b60405180910390f35b610634600480360381019061062f9190613005565b61143a565b6040516106419190613041565b60405180910390f35b610664600480360381019061065f919061310d565b611444565b60405161067191906131be565b60405180910390f35b610694600480360381019061068f919061328a565b611454565b6040516106a1919061333b565b60405180910390f35b6106c460048036038101906106bf9190613356565b611464565b6040516106d19190613383565b60405180910390f35b6106e261146e565b6040516106f19392919061339e565b60405180910390f35b610702611567565b005b61071e60048036038101906107199190613426565b6115c9565b60405161072b9190613462565b60405180910390f35b61074e600480360381019061074991906134b6565b6115d3565b60405161075b91906134f2565b60405180910390f35b61077e6004803603810190610779919061350d565b6115dd565b60405161078b9190612208565b60405180910390f35b6107ae60048036038101906107a9919061353a565b6115e7565b6040516107bb9190613567565b60405180910390f35b6107de60048036038101906107d99190613582565b6115f1565b6040516107eb9190613567565b60405180910390f35b61080e60048036038101906108099190613629565b611616565b60405161081b9190613665565b60405180910390f35b61082c611620565b60606040518060e0016040528060011515815260200160ff8016815260200163075bcd1581526020017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffc521974f815260200173aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa73ffffffffffffffffffffffffffffffffffffffff1681526020017f9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb65881526020016040518060400160405280600b81526020017f73747275637420746573740000000000000000000000000000000000000000008152508152509150600267ffffffffffffffff81111561092757610926611b0e565b5b60405190808252806020026020018201604052801561096057816020015b61094d611620565b8152602001906001900390816109455790505b509050818160008151811061097857610977613680565b5b60200260200101819052506040518060e00160405280600015158152602001608060ff168152602001633b9ac9ff81526020017ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff9609439815260200173bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb73ffffffffffffffffffffffffffffffffffffffff1681526020017f4da432f1ecd4c0ac028ebde3a3f78510a21d54087b161590a63080d33b702b8d81526020016040518060400160405280600d81526020017f7365636f6e64207374727563740000000000000000000000000000000000000081525081525081600181518110610a7457610a73613680565b5b60200260200101819052509091565b6000819050919050565b6060819050919050565b6060819050919050565b6060819050919050565b6000858015610aba5750600085115b8015610ac7575060008414155b8015610b005750600073ffffffffffffffffffffffffffffffffffffffff168373ffffffffffffffffffffffffffffffffffffffff1614155b8015610b0d575060008251115b905095945050505050565b6060819050919050565b6000600267ffffffffffffffff811115610b3f57610b3e611b0e565b5b604051908082528060200260200182016040528015610b6d5781602001602082028036833780820191505090505b509050600181600081518110610b8657610b85613680565b5b602002602001018181525050600281600181518110610ba857610ba7613680565b5b6020026020010181815250506000600167ffffffffffffffff811115610bd157610bd0611b0e565b5b604051908082528060200260200182016040528015610bff5781602001602082028036833780820191505090505b5090503381600081518110610c1757610c16613680565b5b602002602001019073ffffffffffffffffffffffffffffffffffffffff16908173ffffffffffffffffffffffffffffffffffffffff168152505081816040517f754c3513000000000000000000000000000000000000000000000000000000008152600401610c879291906136af565b60405180910390fd5b610c9861167b565b819050919050565b6060819050919050565b6040517ff9006398000000000000000000000000000000000000000000000000000000008152600401610cdc90613732565b60405180910390fd5b60006040518060e00160405280600115158152602001602a60ff16815260200161303981526020017fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff2bcf81526020013373ffffffffffffffffffffffffffffffffffffffff168152602001600143610d5c9190613781565b4081526020016040518060400160405280600c81526020017f6572726f72207374727563740000000000000000000000000000000000000000815250815250905080426040517f8b7e4126000000000000000000000000000000000000000000000000000000008152600401610dd39291906137b5565b60405180910390fd5b6060806060600367ffffffffffffffff811115610dfc57610dfb611b0e565b5b604051908082528060200260200182016040528015610e2a5781602001602082028036833780820191505090505b509250606483600081518110610e4357610e42613680565b5b60200260200101818152505060c883600181518110610e6557610e64613680565b5b60200260200101818152505061012c83600281518110610e8857610e87613680565b5b602002602001018181525050600267ffffffffffffffff811115610eaf57610eae611b0e565b5b604051908082528060200260200182016040528015610edd5781602001602082028036833780820191505090505b5091507fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff9c82600081518110610f1557610f14613680565b5b6020026020010181815250507fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff3882600181518110610f5657610f55613680565b5b602002602001018181525050600267ffffffffffffffff811115610f7d57610f7c611b0e565b5b604051908082528060200260200182016040528015610fab5781602001602082028036833780820191505090505b50905073111111111111111111111111111111111111111181600081518110610fd757610fd6613680565b5b602002602001019073ffffffffffffffffffffffffffffffffffffffff16908173ffffffffffffffffffffffffffffffffffffffff16815250507322222222222222222222222222222222222222228160018151811061103a57611039613680565b5b602002602001019073ffffffffffffffffffffffffffffffffffffffff16908173ffffffffffffffffffffffffffffffffffffffff1681525050909192565b6000819050919050565b6060819050919050565b6101947fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff3360006040517f0b7b086b0000000000000000000000000000000000000000000000000000000081526004016110ea9493929190613865565b60405180910390fd5b6000819050919050565b600080600080606060016130397fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe57b7312345678901234567890123456789012345678906040518060400160405280600b81526020017f68656c6c6f20776f726c64000000000000000000000000000000000000000000815250945094509450945094509091929394565b60008060007fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f8000000000000000000000000000000000000000000000000000000000000000925092509250909192565b6000819050919050565b61120c611620565b819050919050565b6000819050919050565b6060819050919050565b6000819050919050565b6000600267ffffffffffffffff81111561124f5761124e611b0e565b5b60405190808252806020026020018201604052801561127d5781602001602082028036833780820191505090505b50905060648160008151811061129657611295613680565b5b60200260200101818152505060c8816001815181106112b8576112b7613680565b5b6020026020010181815250506000600167ffffffffffffffff8111156112e1576112e0611b0e565b5b60405190808252806020026020018201604052801561130f5781602001602082028036833780820191505090505b5090507ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed48160008151811061134757611346613680565b5b6020026020010181815250506000600167ffffffffffffffff8111156113705761136f611b0e565b5b60405190808252806020026020018201604052801561139e5781602001602082028036833780820191505090505b50905033816000815181106113b6576113b5613680565b5b602002602001019073ffffffffffffffffffffffffffffffffffffffff16908173ffffffffffffffffffffffffffffffffffffffff16815250507f85622bbf72d7da2d2874177aadd8b5de19859ee33997cca5b056591a2419f1e38383836040516114239392919061279e565b60405180910390a1505050565b6000819050919050565b6000819050919050565b61144c61169d565b819050919050565b61145c6116bf565b819050919050565b6000819050919050565b6060806060600067ffffffffffffffff81111561148e5761148d611b0e565b5b6040519080825280602002602001820160405280156114bc5781602001602082028036833780820191505090505b50600067ffffffffffffffff8111156114d8576114d7611b0e565b5b6040519080825280602002602001820160405280156115065781602001602082028036833780820191505090505b50600067ffffffffffffffff81111561152257611521611b0e565b5b60405190808252806020026020018201604052801561155b57816020015b611548611620565b8152602001906001900390816115405790505b50925092509250909192565b613039600115157ffec351d1313ef8d0483489992e601052b6feda5a504be55e7f037a4e8e2739197fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe57b336040516115bf929190613931565b60405180910390a3565b6000819050919050565b6000819050919050565b6000819050919050565b6000819050919050565b6000815183518551611603919061396d565b61160d919061396d565b90509392505050565b6000819050919050565b6040518060e00160405280600015158152602001600060ff1681526020016000815260200160008152602001600073ffffffffffffffffffffffffffffffffffffffff16815260200160008019168152602001606081525090565b6040518060800160405280600490602082028036833780820191505090505090565b6040518060400160405280600290602082028036833780820191505090505090565b6040518060600160405280600390602082028036833780820191505090505090565b60008115159050919050565b6116f6816116e1565b82525050565b600060ff82169050919050565b611712816116fc565b82525050565b6000819050919050565b61172b81611718565b82525050565b6000819050919050565b61174481611731565b82525050565b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b60006117758261174a565b9050919050565b6117858161176a565b82525050565b6000819050919050565b61179e8161178b565b82525050565b600081519050919050565b600082825260208201905092915050565b60005b838110156117de5780820151818401526020810190506117c3565b60008484015250505050565b6000601f19601f8301169050919050565b6000611806826117a4565b61181081856117af565b93506118208185602086016117c0565b611829816117ea565b840191505092915050565b600060e08301600083015161184c60008601826116ed565b50602083015161185f6020860182611709565b5060408301516118726040860182611722565b506060830151611885606086018261173b565b506080830151611898608086018261177c565b5060a08301516118ab60a0860182611795565b5060c083015184820360c08601526118c382826117fb565b9150508091505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b600060e08301600083015161191460008601826116ed565b5060208301516119276020860182611709565b50604083015161193a6040860182611722565b50606083015161194d606086018261173b565b506080830151611960608086018261177c565b5060a083015161197360a0860182611795565b5060c083015184820360c086015261198b82826117fb565b9150508091505092915050565b60006119a483836118fc565b905092915050565b6000602082019050919050565b60006119c4826118d0565b6119ce81856118db565b9350836020820285016119e0856118ec565b8060005b85811015611a1c57848403895281516119fd8582611998565b9450611a08836119ac565b925060208a019950506001810190506119e4565b50829750879550505050505092915050565b60006040820190508181036000830152611a488185611834565b90508181036020830152611a5c81846119b9565b90509392505050565b6000604051905090565b600080fd5b600080fd5b60008160030b9050919050565b611a8f81611a79565b8114611a9a57600080fd5b50565b600081359050611aac81611a86565b92915050565b600060208284031215611ac857611ac7611a6f565b5b6000611ad684828501611a9d565b91505092915050565b611ae881611a79565b82525050565b6000602082019050611b036000830184611adf565b92915050565b600080fd5b7f4e487b7100000000000000000000000000000000000000000000000000000000600052604160045260246000fd5b611b46826117ea565b810181811067ffffffffffffffff82111715611b6557611b64611b0e565b5b80604052505050565b6000611b78611a65565b9050611b848282611b3d565b919050565b600067ffffffffffffffff821115611ba457611ba3611b0e565b5b602082029050602081019050919050565b600080fd5b611bc381611731565b8114611bce57600080fd5b50565b600081359050611be081611bba565b92915050565b6000611bf9611bf484611b89565b611b6e565b90508083825260208201905060208402830185811115611c1c57611c1b611bb5565b5b835b81811015611c455780611c318882611bd1565b845260208401935050602081019050611c1e565b5050509392505050565b600082601f830112611c6457611c63611b09565b5b8135611c74848260208601611be6565b91505092915050565b600060208284031215611c9357611c92611a6f565b5b600082013567ffffffffffffffff811115611cb157611cb0611a74565b5b611cbd84828501611c4f565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b6000611cfe838361173b565b60208301905092915050565b6000602082019050919050565b6000611d2282611cc6565b611d2c8185611cd1565b9350611d3783611ce2565b8060005b83811015611d68578151611d4f8882611cf2565b9750611d5a83611d0a565b925050600181019050611d3b565b5085935050505092915050565b60006020820190508181036000830152611d8f8184611d17565b905092915050565b600067ffffffffffffffff821115611db257611db1611b0e565b5b602082029050602081019050919050565b611dcc8161176a565b8114611dd757600080fd5b50565b600081359050611de981611dc3565b92915050565b6000611e02611dfd84611d97565b611b6e565b90508083825260208201905060208402830185811115611e2557611e24611bb5565b5b835b81811015611e4e5780611e3a8882611dda565b845260208401935050602081019050611e27565b5050509392505050565b600082601f830112611e6d57611e6c611b09565b5b8135611e7d848260208601611def565b91505092915050565b600060208284031215611e9c57611e9b611a6f565b5b600082013567ffffffffffffffff811115611eba57611eb9611a74565b5b611ec684828501611e58565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b6000611f07838361177c565b60208301905092915050565b6000602082019050919050565b6000611f2b82611ecf565b611f358185611eda565b9350611f4083611eeb565b8060005b83811015611f71578151611f588882611efb565b9750611f6383611f13565b925050600181019050611f44565b5085935050505092915050565b60006020820190508181036000830152611f988184611f20565b905092915050565b600080fd5b600067ffffffffffffffff821115611fc057611fbf611b0e565b5b611fc9826117ea565b9050602081019050919050565b82818337600083830152505050565b6000611ff8611ff384611fa5565b611b6e565b90508281526020810184848401111561201457612013611fa0565b5b61201f848285611fd6565b509392505050565b600082601f83011261203c5761203b611b09565b5b813561204c848260208601611fe5565b91505092915050565b60006020828403121561206b5761206a611a6f565b5b600082013567ffffffffffffffff81111561208957612088611a74565b5b61209584828501612027565b91505092915050565b600082825260208201905092915050565b60006120ba826117a4565b6120c4818561209e565b93506120d48185602086016117c0565b6120dd816117ea565b840191505092915050565b6000602082019050818103600083015261210281846120af565b905092915050565b612113816116e1565b811461211e57600080fd5b50565b6000813590506121308161210a565b92915050565b61213f81611718565b811461214a57600080fd5b50565b60008135905061215c81612136565b92915050565b600080600080600060a0868803121561217e5761217d611a6f565b5b600061218c88828901612121565b955050602061219d8882890161214d565b94505060406121ae88828901611bd1565b93505060606121bf88828901611dda565b925050608086013567ffffffffffffffff8111156121e0576121df611a74565b5b6121ec88828901612027565b9150509295509295909350565b612202816116e1565b82525050565b600060208201905061221d60008301846121f9565b92915050565b600067ffffffffffffffff82111561223e5761223d611b0e565b5b602082029050602081019050919050565b600061226261225d84612223565b611b6e565b9050808382526020820190506020840283018581111561228557612284611bb5565b5b835b818110156122ae578061229a8882612121565b845260208401935050602081019050612287565b5050509392505050565b600082601f8301126122cd576122cc611b09565b5b81356122dd84826020860161224f565b91505092915050565b6000602082840312156122fc576122fb611a6f565b5b600082013567ffffffffffffffff81111561231a57612319611a74565b5b612326848285016122b8565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b600061236783836116ed565b60208301905092915050565b6000602082019050919050565b600061238b8261232f565b612395818561233a565b93506123a08361234b565b8060005b838110156123d15781516123b8888261235b565b97506123c383612373565b9250506001810190506123a4565b5085935050505092915050565b600060208201905081810360008301526123f88184612380565b905092915050565b600067ffffffffffffffff82111561241b5761241a611b0e565b5b602082029050919050565b61242f8161178b565b811461243a57600080fd5b50565b60008135905061244c81612426565b92915050565b600061246561246084612400565b611b6e565b9050806020840283018581111561247f5761247e611bb5565b5b835b818110156124a85780612494888261243d565b845260208401935050602081019050612481565b5050509392505050565b600082601f8301126124c7576124c6611b09565b5b60046124d4848285612452565b91505092915050565b6000608082840312156124f3576124f2611a6f565b5b6000612501848285016124b2565b91505092915050565b600060049050919050565b600081905092915050565b6000819050919050565b60006125368383611795565b60208301905092915050565b6000602082019050919050565b6125588161250a565b6125628184612515565b925061256d82612520565b8060005b8381101561259e578151612585878261252a565b965061259083612542565b925050600181019050612571565b505050505050565b60006080820190506125bb600083018461254f565b92915050565b600067ffffffffffffffff8211156125dc576125db611b0e565b5b602082029050602081019050919050565b60006126006125fb846125c1565b611b6e565b9050808382526020820190506020840283018581111561262357612622611bb5565b5b835b8181101561264c5780612638888261214d565b845260208401935050602081019050612625565b5050509392505050565b600082601f83011261266b5761266a611b09565b5b813561267b8482602086016125ed565b91505092915050565b60006020828403121561269a57612699611a6f565b5b600082013567ffffffffffffffff8111156126b8576126b7611a74565b5b6126c484828501612656565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b60006127058383611722565b60208301905092915050565b6000602082019050919050565b6000612729826126cd565b61273381856126d8565b935061273e836126e9565b8060005b8381101561276f57815161275688826126f9565b975061276183612711565b925050600181019050612742565b5085935050505092915050565b60006020820190508181036000830152612796818461271e565b905092915050565b600060608201905081810360008301526127b8818661271e565b905081810360208301526127cc8185611d17565b905081810360408301526127e08184611f20565b9050949350505050565b6127f3816116fc565b81146127fe57600080fd5b50565b600081359050612810816127ea565b92915050565b60006020828403121561282c5761282b611a6f565b5b600061283a84828501612801565b91505092915050565b61284c816116fc565b82525050565b60006020820190506128676000830184612843565b92915050565b600067ffffffffffffffff82111561288857612887611b0e565b5b602082029050602081019050919050565b600080fd5b600080fd5b600060e082840312156128b9576128b8612899565b5b6128c360e0611b6e565b905060006128d384828501612121565b60008301525060206128e784828501612801565b60208301525060406128fb8482850161214d565b604083015250606061290f84828501611bd1565b606083015250608061292384828501611dda565b60808301525060a06129378482850161243d565b60a08301525060c082013567ffffffffffffffff81111561295b5761295a61289e565b5b61296784828501612027565b60c08301525092915050565b60006129866129818461286d565b611b6e565b905080838252602082019050602084028301858111156129a9576129a8611bb5565b5b835b818110156129f057803567ffffffffffffffff8111156129ce576129cd611b09565b5b8086016129db89826128a3565b855260208501945050506020810190506129ab565b5050509392505050565b600082601f830112612a0f57612a0e611b09565b5b8135612a1f848260208601612973565b91505092915050565b600060208284031215612a3e57612a3d611a6f565b5b600082013567ffffffffffffffff811115612a5c57612a5b611a74565b5b612a68848285016129fa565b91505092915050565b60006020820190508181036000830152612a8b81846119b9565b905092915050565b600060208284031215612aa957612aa8611a6f565b5b6000612ab784828501611dda565b91505092915050565b612ac98161176a565b82525050565b6000602082019050612ae46000830184612ac0565b92915050565b612af381611718565b82525050565b612b0281611731565b82525050565b600060a082019050612b1d60008301886121f9565b612b2a6020830187612aea565b612b376040830186612af9565b612b446060830185612ac0565b8181036080830152612b5681846120af565b90509695505050505050565b6000606082019050612b776000830186612aea565b612b846020830185612af9565b612b916040830184612af9565b949350505050565b60008160010b9050919050565b612baf81612b99565b8114612bba57600080fd5b50565b600081359050612bcc81612ba6565b92915050565b600060208284031215612be857612be7611a6f565b5b6000612bf684828501612bbd565b91505092915050565b612c0881612b99565b82525050565b6000602082019050612c236000830184612bff565b92915050565b600060208284031215612c3f57612c3e611a6f565b5b600082013567ffffffffffffffff811115612c5d57612c5c611a74565b5b612c69848285016128a3565b91505092915050565b60006020820190508181036000830152612c8c8184611834565b905092915050565b600067ffffffffffffffff82169050919050565b612cb181612c94565b8114612cbc57600080fd5b50565b600081359050612cce81612ca8565b92915050565b600060208284031215612cea57612ce9611a6f565b5b6000612cf884828501612cbf565b91505092915050565b612d0a81612c94565b82525050565b6000602082019050612d256000830184612d01565b92915050565b600067ffffffffffffffff821115612d4657612d45611b0e565b5b612d4f826117ea565b9050602081019050919050565b6000612d6f612d6a84612d2b565b611b6e565b905082815260208101848484011115612d8b57612d8a611fa0565b5b612d96848285611fd6565b509392505050565b600082601f830112612db357612db2611b09565b5b8135612dc3848260208601612d5c565b91505092915050565b600060208284031215612de257612de1611a6f565b5b600082013567ffffffffffffffff811115612e0057612dff611a74565b5b612e0c84828501612d9e565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000612e3c82612e15565b612e468185612e20565b9350612e568185602086016117c0565b612e5f816117ea565b840191505092915050565b60006020820190508181036000830152612e848184612e31565b905092915050565b60007fff0000000000000000000000000000000000000000000000000000000000000082169050919050565b612ec181612e8c565b8114612ecc57600080fd5b50565b600081359050612ede81612eb8565b92915050565b600060208284031215612efa57612ef9611a6f565b5b6000612f0884828501612ecf565b91505092915050565b612f1a81612e8c565b82525050565b6000602082019050612f356000830184612f11565b92915050565b600061ffff82169050919050565b612f5281612f3b565b8114612f5d57600080fd5b50565b600081359050612f6f81612f49565b92915050565b600060208284031215612f8b57612f8a611a6f565b5b6000612f9984828501612f60565b91505092915050565b612fab81612f3b565b82525050565b6000602082019050612fc66000830184612fa2565b92915050565b60008160000b9050919050565b612fe281612fcc565b8114612fed57600080fd5b50565b600081359050612fff81612fd9565b92915050565b60006020828403121561301b5761301a611a6f565b5b600061302984828501612ff0565b91505092915050565b61303b81612fcc565b82525050565b60006020820190506130566000830184613032565b92915050565b600067ffffffffffffffff82111561307757613076611b0e565b5b602082029050919050565b60006130956130908461305c565b611b6e565b905080602084028301858111156130af576130ae611bb5565b5b835b818110156130d857806130c48882611dda565b8452602084019350506020810190506130b1565b5050509392505050565b600082601f8301126130f7576130f6611b09565b5b6002613104848285613082565b91505092915050565b60006040828403121561312357613122611a6f565b5b6000613131848285016130e2565b91505092915050565b600060029050919050565b600081905092915050565b6000819050919050565b6000602082019050919050565b6131708161313a565b61317a8184613145565b925061318582613150565b8060005b838110156131b657815161319d8782611efb565b96506131a88361315a565b925050600181019050613189565b505050505050565b60006040820190506131d36000830184613167565b92915050565b600067ffffffffffffffff8211156131f4576131f3611b0e565b5b602082029050919050565b600061321261320d846131d9565b611b6e565b9050806020840283018581111561322c5761322b611bb5565b5b835b818110156132555780613241888261214d565b84526020840193505060208101905061322e565b5050509392505050565b600082601f83011261327457613273611b09565b5b60036132818482856131ff565b91505092915050565b6000606082840312156132a05761329f611a6f565b5b60006132ae8482850161325f565b91505092915050565b600060039050919050565b600081905092915050565b6000819050919050565b6000602082019050919050565b6132ed816132b7565b6132f781846132c2565b9250613302826132cd565b8060005b8381101561333357815161331a87826126f9565b9650613325836132d7565b925050600181019050613306565b505050505050565b600060608201905061335060008301846132e4565b92915050565b60006020828403121561336c5761336b611a6f565b5b600061337a84828501611bd1565b91505092915050565b60006020820190506133986000830184612af9565b92915050565b600060608201905081810360008301526133b8818661271e565b905081810360208301526133cc8185611f20565b905081810360408301526133e081846119b9565b9050949350505050565b600063ffffffff82169050919050565b613403816133ea565b811461340e57600080fd5b50565b600081359050613420816133fa565b92915050565b60006020828403121561343c5761343b611a6f565b5b600061344a84828501613411565b91505092915050565b61345c816133ea565b82525050565b60006020820190506134776000830184613453565b92915050565b60008160070b9050919050565b6134938161347d565b811461349e57600080fd5b50565b6000813590506134b08161348a565b92915050565b6000602082840312156134cc576134cb611a6f565b5b60006134da848285016134a1565b91505092915050565b6134ec8161347d565b82525050565b600060208201905061350760008301846134e3565b92915050565b60006020828403121561352357613522611a6f565b5b600061353184828501612121565b91505092915050565b6000602082840312156135505761354f611a6f565b5b600061355e8482850161214d565b91505092915050565b600060208201905061357c6000830184612aea565b92915050565b60008060006060848603121561359b5761359a611a6f565b5b600084013567ffffffffffffffff8111156135b9576135b8611a74565b5b6135c586828701612656565b935050602084013567ffffffffffffffff8111156135e6576135e5611a74565b5b6135f286828701611e58565b925050604084013567ffffffffffffffff81111561361357613612611a74565b5b61361f868287016129fa565b9150509250925092565b60006020828403121561363f5761363e611a6f565b5b600061364d8482850161243d565b91505092915050565b61365f8161178b565b82525050565b600060208201905061367a6000830184613656565b92915050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052603260045260246000fd5b600060408201905081810360008301526136c9818561271e565b905081810360208301526136dd8184611f20565b90509392505050565b7f5468697320697320612073696d706c65206572726f7200000000000000000000600082015250565b600061371c60168361209e565b9150613727826136e6565b602082019050919050565b6000602082019050818103600083015261374b8161370f565b9050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052601160045260246000fd5b600061378c82611718565b915061379783611718565b92508282039050818111156137af576137ae613752565b5b92915050565b600060408201905081810360008301526137cf8185611834565b90506137de6020830184612aea565b9392505050565b6000819050919050565b6000819050919050565b600061381461380f61380a846137e5565b6137ef565b611718565b9050919050565b613824816137f9565b82525050565b6000819050919050565b600061384f61384a6138458461382a565b6137ef565b611731565b9050919050565b61385f81613834565b82525050565b600060808201905061387a600083018761381b565b6138876020830186613856565b6138946040830185612ac0565b6138a160608301846121f9565b95945050505050565b6000819050919050565b60006138cf6138ca6138c5846138aa565b6137ef565b611731565b9050919050565b6138df816138b4565b82525050565b7f6576656e74207465737400000000000000000000000000000000000000000000600082015250565b600061391b600a8361209e565b9150613926826138e5565b602082019050919050565b600060608201905061394660008301856138d6565b6139536020830184612ac0565b81810360408301526139648161390e565b90509392505050565b600061397882611718565b915061398383611718565b925082820190508082111561399b5761399a613752565b5b9291505056fea2646970667358221220768d676a75c575a5228e36584f190ea4057e3b836d240280a4860434f42b1e9064736f6c63430008140033")
-
-// Method information struct
-type MethodInfo struct {
-	Name      string
-	Signature string
-	Selector  HexData
-}
-
-// Event information struct
-type EventInfo struct {
-	Name  string
-	Topic Hash
-}
-
-// Error information struct
-type ErrorInfo struct {
-	Name      string
-	Signature string
-	Selector  HexData
-}
-
-// PackableMethod represents a method with packing capabilities
-type PackableMethod struct {
-	Name      string
-	Signature string
-	Selector  HexData
-}
-
-// PackableEvent represents an event with unpacking capabilities
-type PackableEvent struct {
-	Name  string
-	Topic Hash
-}
-
-// PackableError represents an error with unpacking capabilities
-type PackableError struct {
-	Name      string
-	Signature string
-	Selector  HexData
-}
-
-// Pack encodes method arguments and returns the method selector + encoded arguments
-func (pm *PackableMethod) Pack(args ...any) (HexData, error) {
-	// Start with the 4-byte method selector
-	selectorBytes := pm.Selector.Bytes()
-	if len(selectorBytes) == 0 {
-		return "", fmt.Errorf("invalid method selector")
-	}
-
-	// If no arguments, return just the selector
-	if len(args) == 0 {
-		return pm.Selector, nil
-	}
-
-	// Encode arguments using our ABI implementation
-	var encodedArgs []byte
-	for _, arg := range args {
-		switch v := arg.(type) {
-		case *big.Int:
-			data, err := encodeUint256(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding big.Int: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		case Address:
-			encodedArgs = append(encodedArgs, encodeAddress(v)...)
-		case uint64, uint32, uint16, uint8:
-			data, err := encodeUint256(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding uint: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		case int64, int32, int16, int8, int:
-			data, err := encodeInt256(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding int: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		case bool:
-			encodedArgs = append(encodedArgs, encodeBool(v)...)
-		case string:
-			encodedArgs = append(encodedArgs, encodeString(v)...)
-		case []byte:
-			encodedArgs = append(encodedArgs, encodeBytes(v)...)
-		case [1]byte:
-			encodedArgs = append(encodedArgs, encodeFixedBytes(v[:], 1)...)
-		case [32]byte:
-			encodedArgs = append(encodedArgs, encodeFixedBytes(v[:], 32)...)
-		case []*big.Int:
-			elems := make([]interface{}, len(v))
-			for i, elem := range v {
-				elems[i] = elem
-			}
-			data, err := encodeArray(elems)
-			if err != nil {
-				return "", fmt.Errorf("encoding []*big.Int array: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		case []uint64:
-			elems := make([]interface{}, len(v))
-			for i, elem := range v {
-				elems[i] = elem
-			}
-			data, err := encodeArray(elems)
-			if err != nil {
-				return "", fmt.Errorf("encoding []uint64 array: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		case []Address:
-			elems := make([]interface{}, len(v))
-			for i, elem := range v {
-				elems[i] = elem
-			}
-			data, err := encodeArray(elems)
-			if err != nil {
-				return "", fmt.Errorf("encoding []Address array: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		default:
-			return "", fmt.Errorf("unsupported argument type: %T", v)
-		}
-	}
-
-	// Combine selector + encoded arguments
-	result := make([]byte, len(selectorBytes)+len(encodedArgs))
-	copy(result, selectorBytes)
-	copy(result[len(selectorBytes):], encodedArgs)
-
-	return HexData("0x" + hex.EncodeToString(result)), nil
-}
-
-// MustPack encodes method arguments and panics on error
-func (pm *PackableMethod) MustPack(args ...any) HexData {
-	data, err := pm.Pack(args...)
+func decodeString(data []byte, offset int) (string, int, error) {
+	bytes, nextOffset, err := decodeBytes(data, offset)
 	if err != nil {
-		panic(fmt.Sprintf("Pack failed: %v", err))
+		return "", 0, err
 	}
-	return data
+	return string(bytes), nextOffset, nil
+} // Method information
+func GetArrayInputsMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "arrayInputs",
+		Signature: "arrayInputs(uint256[],address[],(bool,uint8,uint256,int256,address,bytes32,string)[])",
+		Selector:  HexData("0xf9856426"),
+	}
 }
-
-// Constructor information struct
-type ConstructorInfo struct {
-	Signature string
+func GetEchoAddressMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoAddress",
+		Signature: "echoAddress(address)",
+		Selector:  HexData("0x82ac4d4f"),
+	}
 }
-
-// Constructor returns constructor information
-func Constructor() ConstructorInfo {
-	return ConstructorInfo{
-		Signature: "",
+func GetEchoAddressArrayMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoAddressArray",
+		Signature: "echoAddressArray(address[])",
+		Selector:  HexData("0x0cbda481"),
+	}
+}
+func GetEchoAddressFixedArrayMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoAddressFixedArray",
+		Signature: "echoAddressFixedArray(address[2])",
+		Selector:  HexData("0xbfa2937a"),
+	}
+}
+func GetEchoBoolMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoBool",
+		Signature: "echoBool(bool)",
+		Selector:  HexData("0xefe4d607"),
+	}
+}
+func GetEchoBoolArrayMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoBoolArray",
+		Signature: "echoBoolArray(bool[])",
+		Selector:  HexData("0x15c34a1a"),
+	}
+}
+func GetEchoBytesMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoBytes",
+		Signature: "echoBytes(bytes)",
+		Selector:  HexData("0x9a34832d"),
+	}
+}
+func GetEchoBytes1Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoBytes1",
+		Signature: "echoBytes1(bytes1)",
+		Selector:  HexData("0x9d9c433f"),
+	}
+}
+func GetEchoBytes32Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoBytes32",
+		Signature: "echoBytes32(bytes32)",
+		Selector:  HexData("0xfa5ffd62"),
+	}
+}
+func GetEchoBytes32FixedArrayMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoBytes32FixedArray",
+		Signature: "echoBytes32FixedArray(bytes32[4])",
+		Selector:  HexData("0x2b825d11"),
+	}
+}
+func GetEchoInt16Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoInt16",
+		Signature: "echoInt16(int16)",
+		Selector:  HexData("0x891115c3"),
+	}
+}
+func GetEchoInt256Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoInt256",
+		Signature: "echoInt256(int256)",
+		Selector:  HexData("0xcf5cd64f"),
+	}
+}
+func GetEchoInt256ArrayMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoInt256Array",
+		Signature: "echoInt256Array(int256[])",
+		Selector:  HexData("0x09631a0e"),
+	}
+}
+func GetEchoInt32Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoInt32",
+		Signature: "echoInt32(int32)",
+		Selector:  HexData("0x092bb05b"),
+	}
+}
+func GetEchoInt64Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoInt64",
+		Signature: "echoInt64(int64)",
+		Selector:  HexData("0xe4c6857f"),
+	}
+}
+func GetEchoInt8Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoInt8",
+		Signature: "echoInt8(int8)",
+		Selector:  HexData("0xb21859c0"),
+	}
+}
+func GetEchoMixedStructMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoMixedStruct",
+		Signature: "echoMixedStruct((bool,uint8,uint256,int256,address,bytes32,string))",
+		Selector:  HexData("0x8fec3905"),
+	}
+}
+func GetEchoMixedStructArrayMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoMixedStructArray",
+		Signature: "echoMixedStructArray((bool,uint8,uint256,int256,address,bytes32,string)[])",
+		Selector:  HexData("0x6fcf090b"),
+	}
+}
+func GetEchoStringMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoString",
+		Signature: "echoString(string)",
+		Selector:  HexData("0x0d7e2fce"),
+	}
+}
+func GetEchoUint16Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoUint16",
+		Signature: "echoUint16(uint16)",
+		Selector:  HexData("0x9f471a10"),
+	}
+}
+func GetEchoUint256Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoUint256",
+		Signature: "echoUint256(uint256)",
+		Selector:  HexData("0xf07587f8"),
+	}
+}
+func GetEchoUint256ArrayMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoUint256Array",
+		Signature: "echoUint256Array(uint256[])",
+		Selector:  HexData("0x52ad478f"),
+	}
+}
+func GetEchoUint256FixedArrayMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "echoUint256FixedArray",
+		Signature: "echoUint256FixedArray(uint256[3])",
+		Selector:  HexData("0xc8b4acd8"),
+	}
+}
+func GetEchoUint32Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoUint32",
+		Signature: "echoUint32(uint32)",
+		Selector:  HexData("0xe36453af"),
+	}
+}
+func GetEchoUint64Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoUint64",
+		Signature: "echoUint64(uint64)",
+		Selector:  HexData("0x95ccfc7c"),
+	}
+}
+func GetEchoUint8Method() MethodInfo {
+	return MethodInfo{
+		Name:      "echoUint8",
+		Signature: "echoUint8(uint8)",
+		Selector:  HexData("0x648a1e8b"),
+	}
+}
+func GetEmitArrayTypesMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "emitArrayTypes",
+		Signature: "emitArrayTypes()",
+		Selector:  HexData("0x9df0e25a"),
+	}
+}
+func GetEmitBasicTypesMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "emitBasicTypes",
+		Signature: "emitBasicTypes()",
+		Selector:  HexData("0xd90ecf31"),
+	}
+}
+func GetEmptyArraysMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "emptyArrays",
+		Signature: "emptyArrays()",
+		Selector:  HexData("0xd7b7e6d3"),
+	}
+}
+func GetGetArrayTypesMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "getArrayTypes",
+		Signature: "getArrayTypes()",
+		Selector:  HexData("0x58f7e471"),
+	}
+}
+func GetGetBasicTypesMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "getBasicTypes",
+		Signature: "getBasicTypes()",
+		Selector:  HexData("0x84474506"),
+	}
+}
+func GetGetStructTypesMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "getStructTypes",
+		Signature: "getStructTypes()",
+		Selector:  HexData("0x023c47d6"),
+	}
+}
+func GetLargeNumbersMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "largeNumbers",
+		Signature: "largeNumbers()",
+		Selector:  HexData("0x8875b5fe"),
+	}
+}
+func GetMixedInputsMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "mixedInputs",
+		Signature: "mixedInputs(bool,uint256,int256,address,string)",
+		Selector:  HexData("0x114a95f6"),
+	}
+}
+func GetTriggerArrayErrorMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "triggerArrayError",
+		Signature: "triggerArrayError()",
+		Selector:  HexData("0x1d2bdaa4"),
+	}
+}
+func GetTriggerDataTypesErrorMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "triggerDataTypesError",
+		Signature: "triggerDataTypesError()",
+		Selector:  HexData("0x8240db74"),
+	}
+}
+func GetTriggerSimpleErrorMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "triggerSimpleError",
+		Signature: "triggerSimpleError()",
+		Selector:  HexData("0x52fc0936"),
+	}
+}
+func GetTriggerStructErrorMethod() MethodInfo {
+	return MethodInfo{
+		Name:      "triggerStructError",
+		Signature: "triggerStructError()",
+		Selector:  HexData("0x5760d9a0"),
 	}
 }
 
@@ -806,6 +962,117 @@ type EventRegistry struct{}
 
 // Error registry provides access to packable contract errors
 type ErrorRegistry struct{}
+
+// PackableMethod represents a method with packing capabilities
+type PackableMethod struct {
+	Name      string
+	Signature string
+	Selector  HexData
+}
+
+// PackableEvent represents an event with unpacking capabilities
+type PackableEvent struct {
+	Name  string
+	Topic Hash
+}
+
+// EventDecoder represents an event with decode functionality
+type EventDecoder struct {
+	Name  string
+	Topic Hash
+}
+
+// PackableError represents an error with unpacking capabilities
+type PackableError struct {
+	Name      string
+	Signature string
+	Selector  HexData
+}
+
+// MethodInfo represents method metadata
+type MethodInfo struct {
+	Name      string
+	Signature string
+	Selector  HexData
+}
+
+// EventInfo represents event metadata
+type EventInfo struct {
+	Name  string
+	Topic Hash
+}
+
+// ErrorInfo represents error metadata
+type ErrorInfo struct {
+	Name      string
+	Signature string
+	Selector  HexData
+}
+
+// Pack encodes method arguments and returns the method selector + encoded arguments.
+// Uses ABI head-tail encoding: static args are inlined in the head (32 bytes each);
+// dynamic args (string, []byte) get a 32-byte offset pointer in the head, with
+// their data appended in the tail section.
+func (pm *PackableMethod) Pack(args ...any) (HexData, error) {
+	// Start with the 4-byte method selector
+	selectorBytes := pm.Selector.Bytes()
+	if len(selectorBytes) == 0 {
+		return "", fmt.Errorf("invalid method selector")
+	}
+
+	// If no arguments, return just the selector
+	if len(args) == 0 {
+		return pm.Selector, nil
+	}
+
+	type argEncoding struct {
+		data      []byte
+		isDynamic bool
+	}
+
+	encoded := make([]argEncoding, len(args))
+	for i, arg := range args {
+		data, dynamic, err := encodeArg(arg)
+		if err != nil {
+			return "", fmt.Errorf("encoding arg %d: %w", i, err)
+		}
+		encoded[i] = argEncoding{data: data, isDynamic: dynamic}
+	}
+
+	// Build ABI head-tail encoding:
+	// Head: static args inlined (32 bytes); dynamic args get a 32-byte offset pointer.
+	// Tail: dynamic args' encoded data appended in order.
+	headSize := len(args) * 32
+	tailOffset := headSize
+
+	var head []byte
+	var tail []byte
+	for _, enc := range encoded {
+		if enc.isDynamic {
+			offsetBytes, err := encodeUint256(uint64(tailOffset))
+			if err != nil {
+				return "", fmt.Errorf("encoding offset pointer: %w", err)
+			}
+			head = append(head, offsetBytes...)
+			tail = append(tail, enc.data...)
+			tailOffset += len(enc.data)
+		} else {
+			head = append(head, enc.data...)
+		}
+	}
+
+	payload := append(selectorBytes, append(head, tail...)...)
+	return HexData("0x" + hex.EncodeToString(payload)), nil
+}
+
+// MustPack encodes method arguments and panics on error
+func (pm *PackableMethod) MustPack(args ...any) HexData {
+	result, err := pm.Pack(args...)
+	if err != nil {
+		panic(err)
+	}
+	return result
+}
 
 // ArrayInputsMethod returns a packable method for arrayInputs
 func (mr MethodRegistry) ArrayInputsMethod() *ArrayInputsMethod {
@@ -1225,239 +1492,9 @@ func (mr MethodRegistry) TriggerStructErrorMethod() *TriggerStructErrorMethod {
 	}
 }
 
-// ArrayTypesEventEvent returns a packable event for ArrayTypesEvent
-func (er EventRegistry) ArrayTypesEventEvent() *ArrayTypesEventEventDecoder {
-	return &ArrayTypesEventEventDecoder{
-		PackableEvent: PackableEvent{
-			Name:  "ArrayTypesEvent",
-			Topic: HashFromHex("0x85622bbf72d7da2d2874177aadd8b5de19859ee33997cca5b056591a2419f1e3"),
-		},
-	}
-}
-
-// BasicTypesEventEvent returns a packable event for BasicTypesEvent
-func (er EventRegistry) BasicTypesEventEvent() *BasicTypesEventEventDecoder {
-	return &BasicTypesEventEventDecoder{
-		PackableEvent: PackableEvent{
-			Name:  "BasicTypesEvent",
-			Topic: HashFromHex("0xfec351d1313ef8d0483489992e601052b6feda5a504be55e7f037a4e8e273919"),
-		},
-	}
-}
-
-// StructTypesEventEvent returns a packable event for StructTypesEvent
-func (er EventRegistry) StructTypesEventEvent() *StructTypesEventEventDecoder {
-	return &StructTypesEventEventDecoder{
-		PackableEvent: PackableEvent{
-			Name:  "StructTypesEvent",
-			Topic: HashFromHex("0x0b30c61768626c9b3e1a72d7fc409f5709605aff1a4981f074c28993bca30319"),
-		},
-	}
-}
-
-// ArrayErrorError returns a packable error for ArrayError
-func (er ErrorRegistry) ArrayErrorError() *ArrayErrorErrorDecoder {
-	return &ArrayErrorErrorDecoder{
-		PackableError: PackableError{
-			Name:      "ArrayError",
-			Signature: "ArrayError(uint256[],address[])",
-			Selector:  HexData("0x754c3513"),
-		},
-	}
-}
-
-// DataTypesErrorError returns a packable error for DataTypesError
-func (er ErrorRegistry) DataTypesErrorError() *DataTypesErrorErrorDecoder {
-	return &DataTypesErrorErrorDecoder{
-		PackableError: PackableError{
-			Name:      "DataTypesError",
-			Signature: "DataTypesError(uint256,int256,address,bool)",
-			Selector:  HexData("0x0b7b086b"),
-		},
-	}
-}
-
-// SimpleErrorError returns a packable error for SimpleError
-func (er ErrorRegistry) SimpleErrorError() *SimpleErrorErrorDecoder {
-	return &SimpleErrorErrorDecoder{
-		PackableError: PackableError{
-			Name:      "SimpleError",
-			Signature: "SimpleError(string)",
-			Selector:  HexData("0xf9006398"),
-		},
-	}
-}
-
-// StructErrorError returns a packable error for StructError
-func (er ErrorRegistry) StructErrorError() *StructErrorErrorDecoder {
-	return &StructErrorErrorDecoder{
-		PackableError: PackableError{
-			Name:      "StructError",
-			Signature: "StructError((bool,uint8,uint256,int256,address,bytes32,string),uint256)",
-			Selector:  HexData("0x8b7e4126"),
-		},
-	}
-}
-
 // Methods returns the method registry
 func Methods() MethodRegistry {
 	return MethodRegistry{}
-}
-
-// Events returns the event registry
-func Events() EventRegistry {
-	return EventRegistry{}
-}
-
-// Errors returns the error registry
-func Errors() ErrorRegistry {
-	return ErrorRegistry{}
-}
-
-// ArrayTypesEventEvent represents the ArrayTypesEvent event
-type ArrayTypesEventEvent struct {
-	Uints     []*big.Int `json:"uints"`
-	Ints      []*big.Int `json:"ints"`
-	Addresses []Address  `json:"addresses"`
-}
-
-// BasicTypesEventEvent represents the BasicTypesEvent event
-type BasicTypesEventEvent struct {
-	BoolVal    bool     `json:"boolval"`
-	UintVal    *big.Int `json:"uintval"`
-	IntVal     *big.Int `json:"intval"`
-	AddressVal Address  `json:"addressval"`
-	StringVal  string   `json:"stringval"`
-}
-
-// StructTypesEventEvent represents the StructTypesEvent event
-type StructTypesEventEvent struct {
-	Simple  Struct   `json:"simple"`
-	Structs []Struct `json:"structs"`
-}
-
-// ArrayErrorError represents the ArrayError custom error
-type ArrayErrorError struct {
-	Values []*big.Int `json:"values"`
-	Users  []Address  `json:"users"`
-}
-
-// DataTypesErrorError represents the DataTypesError custom error
-type DataTypesErrorError struct {
-	Code  *big.Int `json:"code"`
-	Value *big.Int `json:"value"`
-	User  Address  `json:"user"`
-	Flag  bool     `json:"flag"`
-}
-
-// SimpleErrorError represents the SimpleError custom error
-type SimpleErrorError struct {
-	Message string `json:"message"`
-}
-
-// StructErrorError represents the StructError custom error
-type StructErrorError struct {
-	Data      Struct   `json:"data"`
-	Timestamp *big.Int `json:"timestamp"`
-}
-
-// Struct represents a Solidity struct
-type Struct struct {
-	BoolField    bool     `json:"boolfield"`
-	Uint8Field   uint8    `json:"uint8field"`
-	Uint256Field *big.Int `json:"uint256field"`
-	Int256Field  *big.Int `json:"int256field"`
-	AddressField Address  `json:"addressfield"`
-	Bytes32Field [32]byte `json:"bytes32field"`
-	StringField  string   `json:"stringfield"`
-}
-
-// ArrayInputsInput represents inputs for method arrayInputs
-type ArrayInputsInput struct {
-	Uints     []*big.Int `json:"uints"`
-	Addresses []Address  `json:"addresses"`
-	Structs   []Struct   `json:"structs"`
-}
-
-// EmptyArraysOutput represents outputs for method emptyArrays
-type EmptyArraysOutput struct {
-	EmptyUints     []*big.Int `json:"emptyuints"`
-	EmptyAddresses []Address  `json:"emptyaddresses"`
-	EmptyStructs   []Struct   `json:"emptystructs"`
-}
-
-// GetArrayTypesOutput represents outputs for method getArrayTypes
-type GetArrayTypesOutput struct {
-	Uints     []*big.Int `json:"uints"`
-	Ints      []*big.Int `json:"ints"`
-	Addresses []Address  `json:"addresses"`
-}
-
-// GetBasicTypesOutput represents outputs for method getBasicTypes
-type GetBasicTypesOutput struct {
-	BoolVal    bool     `json:"boolval"`
-	UintVal    *big.Int `json:"uintval"`
-	IntVal     *big.Int `json:"intval"`
-	AddressVal Address  `json:"addressval"`
-	StringVal  string   `json:"stringval"`
-}
-
-// GetStructTypesOutput represents outputs for method getStructTypes
-type GetStructTypesOutput struct {
-	Simple  Struct   `json:"simple"`
-	Structs []Struct `json:"structs"`
-}
-
-// LargeNumbersOutput represents outputs for method largeNumbers
-type LargeNumbersOutput struct {
-	MaxUint256 *big.Int `json:"maxuint256"`
-	MaxInt256  *big.Int `json:"maxint256"`
-	MinInt256  *big.Int `json:"minint256"`
-}
-
-// MixedInputsInput represents inputs for method mixedInputs
-type MixedInputsInput struct {
-	BoolVal    bool     `json:"boolval"`
-	UintVal    *big.Int `json:"uintval"`
-	IntVal     *big.Int `json:"intval"`
-	AddressVal Address  `json:"addressval"`
-	StringVal  string   `json:"stringval"`
-}
-
-// EmptyArraysResult represents the return values for emptyArrays method
-type EmptyArraysResult struct {
-	EmptyUints     []*big.Int `json:"emptyuints"`
-	EmptyAddresses []Address  `json:"emptyaddresses"`
-	EmptyStructs   []Struct   `json:"emptystructs"`
-}
-
-// GetArrayTypesResult represents the return values for getArrayTypes method
-type GetArrayTypesResult struct {
-	Uints     []*big.Int `json:"uints"`
-	Ints      []*big.Int `json:"ints"`
-	Addresses []Address  `json:"addresses"`
-}
-
-// GetBasicTypesResult represents the return values for getBasicTypes method
-type GetBasicTypesResult struct {
-	BoolVal    bool     `json:"boolval"`
-	UintVal    *big.Int `json:"uintval"`
-	IntVal     *big.Int `json:"intval"`
-	AddressVal Address  `json:"addressval"`
-	StringVal  string   `json:"stringval"`
-}
-
-// GetStructTypesResult represents the return values for getStructTypes method
-type GetStructTypesResult struct {
-	Simple  Struct   `json:"simple"`
-	Structs []Struct `json:"structs"`
-}
-
-// LargeNumbersResult represents the return values for largeNumbers method
-type LargeNumbersResult struct {
-	MaxUint256 *big.Int `json:"maxuint256"`
-	MaxInt256  *big.Int `json:"maxint256"`
-	MinInt256  *big.Int `json:"minint256"`
 }
 
 // ArrayInputsMethod represents the arrayInputs method with type-safe decode functionality
@@ -1650,6 +1687,41 @@ type TriggerStructErrorMethod struct {
 	PackableMethod
 }
 
+// ArrayTypesEventEventDecoder returns a decoder for ArrayTypesEvent events
+func (er EventRegistry) ArrayTypesEventEventDecoder() *ArrayTypesEventEventDecoder {
+	return &ArrayTypesEventEventDecoder{
+		PackableEvent: PackableEvent{
+			Name:  "ArrayTypesEvent",
+			Topic: HashFromHex("0x85622bbf72d7da2d2874177aadd8b5de19859ee33997cca5b056591a2419f1e3"),
+		},
+	}
+}
+
+// BasicTypesEventEventDecoder returns a decoder for BasicTypesEvent events
+func (er EventRegistry) BasicTypesEventEventDecoder() *BasicTypesEventEventDecoder {
+	return &BasicTypesEventEventDecoder{
+		PackableEvent: PackableEvent{
+			Name:  "BasicTypesEvent",
+			Topic: HashFromHex("0xfec351d1313ef8d0483489992e601052b6feda5a504be55e7f037a4e8e273919"),
+		},
+	}
+}
+
+// StructTypesEventEventDecoder returns a decoder for StructTypesEvent events
+func (er EventRegistry) StructTypesEventEventDecoder() *StructTypesEventEventDecoder {
+	return &StructTypesEventEventDecoder{
+		PackableEvent: PackableEvent{
+			Name:  "StructTypesEvent",
+			Topic: HashFromHex("0x0b30c61768626c9b3e1a72d7fc409f5709605aff1a4981f074c28993bca30319"),
+		},
+	}
+}
+
+// Events returns the event registry
+func Events() EventRegistry {
+	return EventRegistry{}
+}
+
 // ArrayTypesEventEventDecoder represents the ArrayTypesEvent event with type-safe decode functionality
 type ArrayTypesEventEventDecoder struct {
 	PackableEvent
@@ -1663,6 +1735,55 @@ type BasicTypesEventEventDecoder struct {
 // StructTypesEventEventDecoder represents the StructTypesEvent event with type-safe decode functionality
 type StructTypesEventEventDecoder struct {
 	PackableEvent
+}
+
+// ArrayErrorError returns a packable error for ArrayError
+func (er ErrorRegistry) ArrayErrorError() *ArrayErrorErrorDecoder {
+	return &ArrayErrorErrorDecoder{
+		PackableError: PackableError{
+			Name:      "ArrayError",
+			Signature: "ArrayError(uint256[],address[])",
+			Selector:  HexData("0x754c3513"),
+		},
+	}
+}
+
+// DataTypesErrorError returns a packable error for DataTypesError
+func (er ErrorRegistry) DataTypesErrorError() *DataTypesErrorErrorDecoder {
+	return &DataTypesErrorErrorDecoder{
+		PackableError: PackableError{
+			Name:      "DataTypesError",
+			Signature: "DataTypesError(uint256,int256,address,bool)",
+			Selector:  HexData("0x0b7b086b"),
+		},
+	}
+}
+
+// SimpleErrorError returns a packable error for SimpleError
+func (er ErrorRegistry) SimpleErrorError() *SimpleErrorErrorDecoder {
+	return &SimpleErrorErrorDecoder{
+		PackableError: PackableError{
+			Name:      "SimpleError",
+			Signature: "SimpleError(string)",
+			Selector:  HexData("0xf9006398"),
+		},
+	}
+}
+
+// StructErrorError returns a packable error for StructError
+func (er ErrorRegistry) StructErrorError() *StructErrorErrorDecoder {
+	return &StructErrorErrorDecoder{
+		PackableError: PackableError{
+			Name:      "StructError",
+			Signature: "StructError((bool,uint8,uint256,int256,address,bytes32,string),uint256)",
+			Selector:  HexData("0x8b7e4126"),
+		},
+	}
+}
+
+// Errors returns the error registry
+func Errors() ErrorRegistry {
+	return ErrorRegistry{}
 }
 
 // ArrayErrorErrorDecoder represents the ArrayError error with type-safe decode functionality
@@ -1685,1315 +1806,1812 @@ type StructErrorErrorDecoder struct {
 	PackableError
 }
 
+// ArrayTypesEventEvent represents the ArrayTypesEvent event
+type ArrayTypesEventEvent struct {
+	Uints     []*big.Int `json:"uints"`
+	Ints      []*big.Int `json:"ints"`
+	Addresses []Address  `json:"addresses"`
+}
+
+// BasicTypesEventEvent represents the BasicTypesEvent event
+type BasicTypesEventEvent struct {
+	BoolVal    bool     `json:"boolval"`
+	UintVal    *big.Int `json:"uintval"`
+	IntVal     *big.Int `json:"intval"`
+	AddressVal Address  `json:"addressval"`
+	StringVal  string   `json:"stringval"`
+}
+
+// StructTypesEventEvent represents the StructTypesEvent event
+type StructTypesEventEvent struct {
+	Simple  Struct   `json:"simple"`
+	Structs []Struct `json:"structs"`
+}
+
+// ArrayErrorError represents the ArrayError custom error
+type ArrayErrorError struct {
+	Values []*big.Int `json:"values"`
+	Users  []Address  `json:"users"`
+}
+
+// DataTypesErrorError represents the DataTypesError custom error
+type DataTypesErrorError struct {
+	Code  *big.Int `json:"code"`
+	Value *big.Int `json:"value"`
+	User  Address  `json:"user"`
+	Flag  bool     `json:"flag"`
+}
+
+// SimpleErrorError represents the SimpleError custom error
+type SimpleErrorError struct {
+	Message string `json:"message"`
+}
+
+// StructErrorError represents the StructError custom error
+type StructErrorError struct {
+	Data      Struct   `json:"data"`
+	Timestamp *big.Int `json:"timestamp"`
+}
+
+// Struct represents a Solidity struct
+type Struct struct {
+	BoolField    bool     `json:"boolfield"`
+	Uint8Field   uint8    `json:"uint8field"`
+	Uint256Field *big.Int `json:"uint256field"`
+	Int256Field  *big.Int `json:"int256field"`
+	AddressField Address  `json:"addressfield"`
+	Bytes32Field [32]byte `json:"bytes32field"`
+	StringField  string   `json:"stringfield"`
+}
+
+// ArrayInputsInput represents inputs for method arrayInputs
+type ArrayInputsInput struct {
+	Uints     []*big.Int `json:"uints"`
+	Addresses []Address  `json:"addresses"`
+	Structs   []Struct   `json:"structs"`
+}
+
+// EmptyArraysOutput represents outputs for method emptyArrays
+type EmptyArraysOutput struct {
+	EmptyUints     []*big.Int `json:"emptyuints"`
+	EmptyAddresses []Address  `json:"emptyaddresses"`
+	EmptyStructs   []Struct   `json:"emptystructs"`
+}
+
+// GetArrayTypesOutput represents outputs for method getArrayTypes
+type GetArrayTypesOutput struct {
+	Uints     []*big.Int `json:"uints"`
+	Ints      []*big.Int `json:"ints"`
+	Addresses []Address  `json:"addresses"`
+}
+
+// GetBasicTypesOutput represents outputs for method getBasicTypes
+type GetBasicTypesOutput struct {
+	BoolVal    bool     `json:"boolval"`
+	UintVal    *big.Int `json:"uintval"`
+	IntVal     *big.Int `json:"intval"`
+	AddressVal Address  `json:"addressval"`
+	StringVal  string   `json:"stringval"`
+}
+
+// GetStructTypesOutput represents outputs for method getStructTypes
+type GetStructTypesOutput struct {
+	Simple  Struct   `json:"simple"`
+	Structs []Struct `json:"structs"`
+}
+
+// LargeNumbersOutput represents outputs for method largeNumbers
+type LargeNumbersOutput struct {
+	MaxUint256 *big.Int `json:"maxuint256"`
+	MaxInt256  *big.Int `json:"maxint256"`
+	MinInt256  *big.Int `json:"minint256"`
+}
+
+// MixedInputsInput represents inputs for method mixedInputs
+type MixedInputsInput struct {
+	BoolVal    bool     `json:"boolval"`
+	UintVal    *big.Int `json:"uintval"`
+	IntVal     *big.Int `json:"intval"`
+	AddressVal Address  `json:"addressval"`
+	StringVal  string   `json:"stringval"`
+}
+
+// EmptyArraysResult represents the return values for emptyArrays method
+type EmptyArraysResult struct {
+	EmptyUints     []*big.Int `json:"emptyuints"`
+	EmptyAddresses []Address  `json:"emptyaddresses"`
+	EmptyStructs   []Struct   `json:"emptystructs"`
+}
+
+// GetArrayTypesResult represents the return values for getArrayTypes method
+type GetArrayTypesResult struct {
+	Uints     []*big.Int `json:"uints"`
+	Ints      []*big.Int `json:"ints"`
+	Addresses []Address  `json:"addresses"`
+}
+
+// GetBasicTypesResult represents the return values for getBasicTypes method
+type GetBasicTypesResult struct {
+	BoolVal    bool     `json:"boolval"`
+	UintVal    *big.Int `json:"uintval"`
+	IntVal     *big.Int `json:"intval"`
+	AddressVal Address  `json:"addressval"`
+	StringVal  string   `json:"stringval"`
+}
+
+// GetStructTypesResult represents the return values for getStructTypes method
+type GetStructTypesResult struct {
+	Simple  Struct   `json:"simple"`
+	Structs []Struct `json:"structs"`
+}
+
+// LargeNumbersResult represents the return values for largeNumbers method
+type LargeNumbersResult struct {
+	MaxUint256 *big.Int `json:"maxuint256"`
+	MaxInt256  *big.Int `json:"maxint256"`
+	MinInt256  *big.Int `json:"minint256"`
+}
+
+// decodeStruct decodes a Struct struct from ABI-encoded data starting at offset.
+// It returns the decoded value and the offset of the next field after the head section.
+func decodeStruct(data []byte, offset int) (Struct, int, error) {
+	var result Struct
+	baseOffset := offset
+	headOffset := offset
+
+	// ── Phase 1: head section ──────────────────────────────────────────────────
+	// Static fields are decoded inline. Dynamic fields (string, []byte, slices)
+	// store a relative-offset pointer here; the actual data is in the tail.
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for Struct.BoolField")
+	}
+	val0, err0 := decodeBool(data[headOffset : headOffset+32])
+	if err0 != nil {
+		return result, 0, fmt.Errorf("decoding Struct.BoolField: %w", err0)
+	}
+	result.BoolField = val0
+	headOffset += 32
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for Struct.Uint8Field")
+	}
+	val1, err1 := decodeUint8(data[headOffset : headOffset+32])
+	if err1 != nil {
+		return result, 0, fmt.Errorf("decoding Struct.Uint8Field: %w", err1)
+	}
+	result.Uint8Field = val1
+	headOffset += 32
+	// Uint256Field (static *big.Int)
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for Struct.Uint256Field")
+	}
+	val2, err2 := decodeUint256(data[headOffset : headOffset+32])
+	if err2 != nil {
+		return result, 0, fmt.Errorf("decoding Struct.Uint256Field: %w", err2)
+	}
+	result.Uint256Field = val2
+	headOffset += 32
+	// Int256Field (static *big.Int)
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for Struct.Int256Field")
+	}
+	val3, err3 := decodeInt256(data[headOffset : headOffset+32])
+	if err3 != nil {
+		return result, 0, fmt.Errorf("decoding Struct.Int256Field: %w", err3)
+	}
+	result.Int256Field = val3
+	headOffset += 32
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for Struct.AddressField")
+	}
+	val4, err4 := decodeAddress(data[headOffset : headOffset+32])
+	if err4 != nil {
+		return result, 0, fmt.Errorf("decoding Struct.AddressField: %w", err4)
+	}
+	result.AddressField = val4
+	headOffset += 32
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for Struct.Bytes32Field")
+	}
+	val5, err5 := decodeBytes32(data[headOffset : headOffset+32])
+	if err5 != nil {
+		return result, 0, fmt.Errorf("decoding Struct.Bytes32Field: %w", err5)
+	}
+	result.Bytes32Field = val5
+	headOffset += 32
+	// StringField (dynamic): read relative-offset pointer
+	if len(data) < headOffset+32 {
+		return result, 0, errors.New("insufficient data for Struct.StringField offset pointer")
+	}
+	relOff6, errRO6 := decodeUint256(data[headOffset : headOffset+32])
+	if errRO6 != nil {
+		return result, 0, fmt.Errorf("reading Struct.StringField offset: %w", errRO6)
+	}
+	if !relOff6.IsUint64() {
+		return result, 0, errors.New("Struct.StringField offset too large")
+	}
+	absOff6 := baseOffset + int(relOff6.Uint64())
+	headOffset += 32
+
+	// ── Phase 2: tail section — decode dynamic fields at their absolute offsets ─
+	str6, _, errStr6 := decodeString(data, absOff6)
+	if errStr6 != nil {
+		return result, 0, fmt.Errorf("decoding Struct.StringField: %w", errStr6)
+	}
+	result.StringField = str6
+
+	_ = baseOffset
+	return result, headOffset, nil
+}
+
 // Decode decodes return values for arrayInputs method
 func (m *ArrayInputsMethod) Decode(data []byte) (*big.Int, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for arrayInputs method
 func (m *ArrayInputsMethod) MustDecode(data []byte) *big.Int {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *ArrayInputsMethod) mustDecodeImpl(data []byte) *big.Int {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *ArrayInputsMethod) decodeImpl(data []byte) (*big.Int, error) {
+	var result *big.Int
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return mustDecodeUint256(data[0:32])
+	{
+		v, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoAddress method
 func (m *EchoAddressMethod) Decode(data []byte) (Address, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoAddress method
 func (m *EchoAddressMethod) MustDecode(data []byte) Address {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoAddressMethod) mustDecodeImpl(data []byte) Address {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoAddressMethod) decodeImpl(data []byte) (Address, error) {
+	var result Address
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeAddress(data[0:32])
+	{
+		v, e := decodeAddress(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoAddressArray method
 func (m *EchoAddressArrayMethod) Decode(data []byte) ([]Address, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoAddressArray method
 func (m *EchoAddressArrayMethod) MustDecode(data []byte) []Address {
-	return m.mustDecodeImpl(data)
-}
-
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoAddressArrayMethod) mustDecodeImpl(data []byte) []Address {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
-	}
-	// Handle offset-based encoding for dynamic arrays
-	dataOffset := 0
-	if len(data) >= 32 {
-		firstValue := mustDecodeUint256(data[0:32])
-		if firstValue.Uint64() == 32 {
-			dataOffset = 32 // Skip offset pointer
-		}
-	}
-	elems, _ := decodeArray(data, dataOffset, decodeAddressArrayElement)
-	result := make([]Address, len(elems))
-	for i, elem := range elems {
-		result[i] = elem.(Address)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
 	}
 	return result
+}
+
+// decodeImpl contains the actual decode logic
+func (m *EchoAddressArrayMethod) decodeImpl(data []byte) ([]Address, error) {
+	var result []Address
+	offset := 0
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeAddress)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = s
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoAddressFixedArray method
 func (m *EchoAddressFixedArrayMethod) Decode(data []byte) ([2]Address, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoAddressFixedArray method
 func (m *EchoAddressFixedArrayMethod) MustDecode(data []byte) [2]Address {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoAddressFixedArrayMethod) mustDecodeImpl(data []byte) [2]Address {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoAddressFixedArrayMethod) decodeImpl(data []byte) ([2]Address, error) {
+	var result [2]Address
+	offset := 0
+	{
+		tmp, e := decodeStaticFixedArray(data, offset, 2, decodeAddress)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		var arr [2]Address
+		copy(arr[:], tmp)
+		result = arr
 	}
-	// Unsupported return type: [2]Address
-	panic("unsupported return type: [2]Address")
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoBool method
 func (m *EchoBoolMethod) Decode(data []byte) (bool, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoBool method
 func (m *EchoBoolMethod) MustDecode(data []byte) bool {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoBoolMethod) mustDecodeImpl(data []byte) bool {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoBoolMethod) decodeImpl(data []byte) (bool, error) {
+	var result bool
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeBool(data[0:32])
+	{
+		v, e := decodeBool(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoBoolArray method
 func (m *EchoBoolArrayMethod) Decode(data []byte) ([]bool, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoBoolArray method
 func (m *EchoBoolArrayMethod) MustDecode(data []byte) []bool {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoBoolArrayMethod) mustDecodeImpl(data []byte) []bool {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
-	}
-	// Custom struct array type: []bool
-	if len(data) < 32 {
-		panic("insufficient data for array length")
-	}
-
-	// Check if first 32 bytes are offset or direct length
-	firstValue := mustDecodeUint256(data[0:32])
-	var length int
-	var dataOffset int
-
-	if firstValue.Uint64() == 32 {
-		// Offset-based encoding for dynamic arrays
-		if len(data) < 64 {
-			panic("insufficient data for dynamic array")
+// decodeImpl contains the actual decode logic
+func (m *EchoBoolArrayMethod) decodeImpl(data []byte) ([]bool, error) {
+	var result []bool
+	offset := 0
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeBool)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
 		}
-		lengthBig := mustDecodeUint256(data[32:64])
-		if !lengthBig.IsUint64() {
-			panic("array length too large")
-		}
-		length = int(lengthBig.Uint64())
-		dataOffset = 64 // Skip offset + length
-	} else {
-		// Direct length encoding
-		if !firstValue.IsUint64() {
-			panic("array length too large")
-		}
-		length = int(firstValue.Uint64())
-		dataOffset = 32 // Skip length only
+		result = s
 	}
-
-	elemTypeName := "[]bool"[2:] // Remove "[]" prefix
-	if elemTypeName == "Struct" {
-		result := make([]bool, length)
-		offset := dataOffset
-		for i := 0; i < length; i++ {
-			var nextOffset int
-			result[i], nextOffset = decodeStruct(data, offset)
-			offset = nextOffset
-		}
-		return result
-	}
-	panic("unknown struct type for array: " + elemTypeName)
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoBytes method
 func (m *EchoBytesMethod) Decode(data []byte) ([]byte, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoBytes method
 func (m *EchoBytesMethod) MustDecode(data []byte) []byte {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoBytesMethod) mustDecodeImpl(data []byte) []byte {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoBytesMethod) decodeImpl(data []byte) ([]byte, error) {
+	var result []byte
+	offset := 0
+	{
+		ptr, e := readOffset(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		b, _, e2 := decodeBytes(data, ptr)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value: %w", e2)
+		}
+		result = b
 	}
-	result, _ := decodeBytes(data, 0)
-	return result
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoBytes1 method
 func (m *EchoBytes1Method) Decode(data []byte) ([1]byte, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoBytes1 method
 func (m *EchoBytes1Method) MustDecode(data []byte) [1]byte {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoBytes1Method) mustDecodeImpl(data []byte) [1]byte {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoBytes1Method) decodeImpl(data []byte) ([1]byte, error) {
+	var result [1]byte
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeBytes1(data[0:32])
+	{
+		v, e := decodeBytes1(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoBytes32 method
 func (m *EchoBytes32Method) Decode(data []byte) ([32]byte, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoBytes32 method
 func (m *EchoBytes32Method) MustDecode(data []byte) [32]byte {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoBytes32Method) mustDecodeImpl(data []byte) [32]byte {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoBytes32Method) decodeImpl(data []byte) ([32]byte, error) {
+	var result [32]byte
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeBytes32(data[0:32])
+	{
+		v, e := decodeBytes32(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoBytes32FixedArray method
 func (m *EchoBytes32FixedArrayMethod) Decode(data []byte) ([4][32]byte, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoBytes32FixedArray method
 func (m *EchoBytes32FixedArrayMethod) MustDecode(data []byte) [4][32]byte {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoBytes32FixedArrayMethod) mustDecodeImpl(data []byte) [4][32]byte {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoBytes32FixedArrayMethod) decodeImpl(data []byte) ([4][32]byte, error) {
+	var result [4][32]byte
+	offset := 0
+	{
+		tmp, e := decodeStaticFixedArray(data, offset, 4, decodeBytes32)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		var arr [4][32]byte
+		copy(arr[:], tmp)
+		result = arr
 	}
-	// Unsupported return type: [4][32]byte
-	panic("unsupported return type: [4][32]byte")
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoInt16 method
 func (m *EchoInt16Method) Decode(data []byte) (int16, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoInt16 method
 func (m *EchoInt16Method) MustDecode(data []byte) int16 {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoInt16Method) mustDecodeImpl(data []byte) int16 {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoInt16Method) decodeImpl(data []byte) (int16, error) {
+	var result int16
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return int16(decodeInt64(data[0:32]))
+	{
+		raw, e := decodeInt64(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = int16(raw)
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoInt256 method
 func (m *EchoInt256Method) Decode(data []byte) (*big.Int, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoInt256 method
 func (m *EchoInt256Method) MustDecode(data []byte) *big.Int {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoInt256Method) mustDecodeImpl(data []byte) *big.Int {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoInt256Method) decodeImpl(data []byte) (*big.Int, error) {
+	var result *big.Int
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return mustDecodeInt256(data[0:32])
+	{
+		v, e := decodeInt256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoInt256Array method
 func (m *EchoInt256ArrayMethod) Decode(data []byte) ([]*big.Int, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoInt256Array method
 func (m *EchoInt256ArrayMethod) MustDecode(data []byte) []*big.Int {
-	return m.mustDecodeImpl(data)
-}
-
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoInt256ArrayMethod) mustDecodeImpl(data []byte) []*big.Int {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
-	}
-	// Handle offset-based encoding for dynamic arrays
-	dataOffset := 0
-	if len(data) >= 32 {
-		firstValue := mustDecodeUint256(data[0:32])
-		if firstValue.Uint64() == 32 {
-			dataOffset = 32 // Skip offset pointer
-		}
-	}
-	elems, _ := decodeArray(data, dataOffset, decodeUint256ArrayElement)
-	result := make([]*big.Int, len(elems))
-	for i, elem := range elems {
-		result[i] = elem.(*big.Int)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
 	}
 	return result
+}
+
+// decodeImpl contains the actual decode logic
+func (m *EchoInt256ArrayMethod) decodeImpl(data []byte) ([]*big.Int, error) {
+	var result []*big.Int
+	offset := 0
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeInt256)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = s
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoInt32 method
 func (m *EchoInt32Method) Decode(data []byte) (int32, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoInt32 method
 func (m *EchoInt32Method) MustDecode(data []byte) int32 {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoInt32Method) mustDecodeImpl(data []byte) int32 {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoInt32Method) decodeImpl(data []byte) (int32, error) {
+	var result int32
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return int32(decodeInt64(data[0:32]))
+	{
+		raw, e := decodeInt64(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = int32(raw)
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoInt64 method
 func (m *EchoInt64Method) Decode(data []byte) (int64, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoInt64 method
 func (m *EchoInt64Method) MustDecode(data []byte) int64 {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoInt64Method) mustDecodeImpl(data []byte) int64 {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoInt64Method) decodeImpl(data []byte) (int64, error) {
+	var result int64
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeInt64(data[0:32])
+	{
+		v, e := decodeInt64(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoInt8 method
 func (m *EchoInt8Method) Decode(data []byte) (int8, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoInt8 method
 func (m *EchoInt8Method) MustDecode(data []byte) int8 {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoInt8Method) mustDecodeImpl(data []byte) int8 {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoInt8Method) decodeImpl(data []byte) (int8, error) {
+	var result int8
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return int8(decodeInt64(data[0:32]))
+	{
+		raw, e := decodeInt64(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = int8(raw)
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoMixedStruct method
 func (m *EchoMixedStructMethod) Decode(data []byte) (Struct, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoMixedStruct method
 func (m *EchoMixedStructMethod) MustDecode(data []byte) Struct {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoMixedStructMethod) mustDecodeImpl(data []byte) Struct {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoMixedStructMethod) decodeImpl(data []byte) (Struct, error) {
+	var result Struct
+	offset := 0
+	{
+		v, no, e := decodeStruct(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+		offset = no
 	}
-	// Unsupported return type: Struct
-	panic("unsupported return type: Struct")
+	return result, nil
 }
 
 // Decode decodes return values for echoMixedStructArray method
 func (m *EchoMixedStructArrayMethod) Decode(data []byte) ([]Struct, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoMixedStructArray method
 func (m *EchoMixedStructArrayMethod) MustDecode(data []byte) []Struct {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoMixedStructArrayMethod) mustDecodeImpl(data []byte) []Struct {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
-	}
-	// Custom struct array type: []Struct
-	if len(data) < 32 {
-		panic("insufficient data for array length")
-	}
-
-	// Check if first 32 bytes are offset or direct length
-	firstValue := mustDecodeUint256(data[0:32])
-	var length int
-	var dataOffset int
-
-	if firstValue.Uint64() == 32 {
-		// Offset-based encoding for dynamic arrays
-		if len(data) < 64 {
-			panic("insufficient data for dynamic array")
+// decodeImpl contains the actual decode logic
+func (m *EchoMixedStructArrayMethod) decodeImpl(data []byte) ([]Struct, error) {
+	var result []Struct
+	offset := 0
+	{
+		arrayOffset, e := readOffset(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
 		}
-		lengthBig := mustDecodeUint256(data[32:64])
-		if !lengthBig.IsUint64() {
-			panic("array length too large")
+		length, e2 := readOffset(data, arrayOffset)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value length: %w", e2)
 		}
-		length = int(lengthBig.Uint64())
-		dataOffset = 64 // Skip offset + length
-	} else {
-		// Direct length encoding
-		if !firstValue.IsUint64() {
-			panic("array length too large")
-		}
-		length = int(firstValue.Uint64())
-		dataOffset = 32 // Skip length only
-	}
-
-	elemTypeName := "[]Struct"[2:] // Remove "[]" prefix
-	if elemTypeName == "Struct" {
-		result := make([]Struct, length)
-		offset := dataOffset
+		arr := make([]Struct, length)
+		elemOff := arrayOffset + 32
 		for i := 0; i < length; i++ {
-			var nextOffset int
-			result[i], nextOffset = decodeStruct(data, offset)
-			offset = nextOffset
+			v, no, e3 := decodeStruct(data, elemOff)
+			if e3 != nil {
+				return result, fmt.Errorf("decoding return value element %d: %w", i, e3)
+			}
+			arr[i] = v
+			elemOff = no
 		}
-		return result
+		result = arr
 	}
-	panic("unknown struct type for array: " + elemTypeName)
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoString method
 func (m *EchoStringMethod) Decode(data []byte) (string, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoString method
 func (m *EchoStringMethod) MustDecode(data []byte) string {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoStringMethod) mustDecodeImpl(data []byte) string {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoStringMethod) decodeImpl(data []byte) (string, error) {
+	var result string
+	offset := 0
+	{
+		ptr, e := readOffset(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		s, _, e2 := decodeString(data, ptr)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value: %w", e2)
+		}
+		result = s
 	}
-	result, _ := decodeString(data, 0)
-	return result
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoUint16 method
 func (m *EchoUint16Method) Decode(data []byte) (uint16, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoUint16 method
 func (m *EchoUint16Method) MustDecode(data []byte) uint16 {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoUint16Method) mustDecodeImpl(data []byte) uint16 {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoUint16Method) decodeImpl(data []byte) (uint16, error) {
+	var result uint16
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeUint16(data[0:32])
+	{
+		v, e := decodeUint16(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoUint256 method
 func (m *EchoUint256Method) Decode(data []byte) (*big.Int, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoUint256 method
 func (m *EchoUint256Method) MustDecode(data []byte) *big.Int {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoUint256Method) mustDecodeImpl(data []byte) *big.Int {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoUint256Method) decodeImpl(data []byte) (*big.Int, error) {
+	var result *big.Int
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return mustDecodeUint256(data[0:32])
+	{
+		v, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoUint256Array method
 func (m *EchoUint256ArrayMethod) Decode(data []byte) ([]*big.Int, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoUint256Array method
 func (m *EchoUint256ArrayMethod) MustDecode(data []byte) []*big.Int {
-	return m.mustDecodeImpl(data)
-}
-
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoUint256ArrayMethod) mustDecodeImpl(data []byte) []*big.Int {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
-	}
-	// Handle offset-based encoding for dynamic arrays
-	dataOffset := 0
-	if len(data) >= 32 {
-		firstValue := mustDecodeUint256(data[0:32])
-		if firstValue.Uint64() == 32 {
-			dataOffset = 32 // Skip offset pointer
-		}
-	}
-	elems, _ := decodeArray(data, dataOffset, decodeUint256ArrayElement)
-	result := make([]*big.Int, len(elems))
-	for i, elem := range elems {
-		result[i] = elem.(*big.Int)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
 	}
 	return result
+}
+
+// decodeImpl contains the actual decode logic
+func (m *EchoUint256ArrayMethod) decodeImpl(data []byte) ([]*big.Int, error) {
+	var result []*big.Int
+	offset := 0
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeUint256)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = s
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoUint256FixedArray method
 func (m *EchoUint256FixedArrayMethod) Decode(data []byte) ([3]*big.Int, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoUint256FixedArray method
 func (m *EchoUint256FixedArrayMethod) MustDecode(data []byte) [3]*big.Int {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoUint256FixedArrayMethod) mustDecodeImpl(data []byte) [3]*big.Int {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoUint256FixedArrayMethod) decodeImpl(data []byte) ([3]*big.Int, error) {
+	var result [3]*big.Int
+	offset := 0
+	{
+		tmp, e := decodeStaticFixedArray(data, offset, 3, decodeUint256)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		var arr [3]*big.Int
+		copy(arr[:], tmp)
+		result = arr
 	}
-	// Unsupported return type: [3]*big.Int
-	panic("unsupported return type: [3]*big.Int")
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoUint32 method
 func (m *EchoUint32Method) Decode(data []byte) (uint32, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoUint32 method
 func (m *EchoUint32Method) MustDecode(data []byte) uint32 {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoUint32Method) mustDecodeImpl(data []byte) uint32 {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoUint32Method) decodeImpl(data []byte) (uint32, error) {
+	var result uint32
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeUint32(data[0:32])
+	{
+		v, e := decodeUint32(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoUint64 method
 func (m *EchoUint64Method) Decode(data []byte) (uint64, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoUint64 method
 func (m *EchoUint64Method) MustDecode(data []byte) uint64 {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoUint64Method) mustDecodeImpl(data []byte) uint64 {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoUint64Method) decodeImpl(data []byte) (uint64, error) {
+	var result uint64
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeUint64(data[0:32])
+	{
+		v, e := decodeUint64(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for echoUint8 method
 func (m *EchoUint8Method) Decode(data []byte) (uint8, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for echoUint8 method
 func (m *EchoUint8Method) MustDecode(data []byte) uint8 {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *EchoUint8Method) mustDecodeImpl(data []byte) uint8 {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *EchoUint8Method) decodeImpl(data []byte) (uint8, error) {
+	var result uint8
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeUint8(data[0:32])
+	{
+		v, e := decodeUint8(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for emptyArrays method
 func (m *EmptyArraysMethod) Decode(data []byte) (EmptyArraysResult, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for emptyArrays method
 func (m *EmptyArraysMethod) MustDecode(data []byte) EmptyArraysResult {
-	return m.mustDecodeImpl(data)
-}
-
-// mustDecodeImpl contains the actual decode logic
-func (m *EmptyArraysMethod) mustDecodeImpl(data []byte) EmptyArraysResult {
-	// Multiple return values - return as struct
-	result := EmptyArraysResult{}
-	offset := 0
-	// Unsupported multi-return type: []*big.Int
-	panic("unsupported multi-return type: []*big.Int")
-	// Unsupported multi-return type: []Address
-	panic("unsupported multi-return type: []Address")
-	// Custom struct array type for multi-return: []Struct
-	if len(data) < offset+32 {
-		panic("insufficient data for struct array length in return value 2")
-	}
-	lengthBig := mustDecodeUint256(data[offset : offset+32])
-	if !lengthBig.IsUint64() {
-		panic("struct array length too large in return value 2")
-	}
-	length := int(lengthBig.Uint64())
-	offset += 32
-
-	elemTypeName := "[]Struct"[2:] // Remove "[]" prefix
-	if elemTypeName == "Struct" {
-		result.EmptyStructs = make([]Struct, length)
-		for i := 0; i < length; i++ {
-			var nextOffset int
-			result.EmptyStructs[i], nextOffset = decodeStruct(data, offset)
-			offset = nextOffset
-		}
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
 	}
 	return result
+}
+
+// decodeImpl contains the actual decode logic
+func (m *EmptyArraysMethod) decodeImpl(data []byte) (EmptyArraysResult, error) {
+	// Multiple return values - return as struct
+	var result EmptyArraysResult
+	offset := 0
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeUint256)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 0: %w", e)
+		}
+		result.EmptyUints = s
+	}
+	offset += 32
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeAddress)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 1: %w", e)
+		}
+		result.EmptyAddresses = s
+	}
+	offset += 32
+	{
+		arrayOffset, e := readOffset(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 2: %w", e)
+		}
+		length, e2 := readOffset(data, arrayOffset)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value 2 length: %w", e2)
+		}
+		arr := make([]Struct, length)
+		elemOff := arrayOffset + 32
+		for i := 0; i < length; i++ {
+			v, no, e3 := decodeStruct(data, elemOff)
+			if e3 != nil {
+				return result, fmt.Errorf("decoding return value 2 element %d: %w", i, e3)
+			}
+			arr[i] = v
+			elemOff = no
+		}
+		result.EmptyStructs = arr
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for getArrayTypes method
 func (m *GetArrayTypesMethod) Decode(data []byte) (GetArrayTypesResult, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for getArrayTypes method
 func (m *GetArrayTypesMethod) MustDecode(data []byte) GetArrayTypesResult {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *GetArrayTypesMethod) mustDecodeImpl(data []byte) GetArrayTypesResult {
+// decodeImpl contains the actual decode logic
+func (m *GetArrayTypesMethod) decodeImpl(data []byte) (GetArrayTypesResult, error) {
 	// Multiple return values - return as struct
-	result := GetArrayTypesResult{}
+	var result GetArrayTypesResult
 	offset := 0
-	// Unsupported multi-return type: []*big.Int
-	panic("unsupported multi-return type: []*big.Int")
-	// Unsupported multi-return type: []*big.Int
-	panic("unsupported multi-return type: []*big.Int")
-	// Unsupported multi-return type: []Address
-	panic("unsupported multi-return type: []Address")
-	return result
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeUint256)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 0: %w", e)
+		}
+		result.Uints = s
+	}
+	offset += 32
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeInt256)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 1: %w", e)
+		}
+		result.Ints = s
+	}
+	offset += 32
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeAddress)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 2: %w", e)
+		}
+		result.Addresses = s
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for getBasicTypes method
 func (m *GetBasicTypesMethod) Decode(data []byte) (GetBasicTypesResult, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for getBasicTypes method
 func (m *GetBasicTypesMethod) MustDecode(data []byte) GetBasicTypesResult {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *GetBasicTypesMethod) mustDecodeImpl(data []byte) GetBasicTypesResult {
+// decodeImpl contains the actual decode logic
+func (m *GetBasicTypesMethod) decodeImpl(data []byte) (GetBasicTypesResult, error) {
 	// Multiple return values - return as struct
-	result := GetBasicTypesResult{}
+	var result GetBasicTypesResult
 	offset := 0
 	if len(data) < offset+32 {
-		panic("insufficient data for return value 0")
+		return result, errors.New("insufficient data for return value 0")
 	}
-	result.BoolVal = decodeBool(data[offset : offset+32])
+	{
+		v, e := decodeBool(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 0: %w", e)
+		}
+		result.BoolVal = v
+	}
 	offset += 32
 	if len(data) < offset+32 {
-		panic("insufficient data for return value 1")
+		return result, errors.New("insufficient data for return value 1")
 	}
-	result.UintVal = mustDecodeUint256(data[offset : offset+32])
+	{
+		v, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 1: %w", e)
+		}
+		result.UintVal = v
+	}
 	offset += 32
 	if len(data) < offset+32 {
-		panic("insufficient data for return value 2")
+		return result, errors.New("insufficient data for return value 2")
 	}
-	result.IntVal = mustDecodeInt256(data[offset : offset+32])
+	{
+		v, e := decodeInt256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 2: %w", e)
+		}
+		result.IntVal = v
+	}
 	offset += 32
 	if len(data) < offset+32 {
-		panic("insufficient data for return value 3")
+		return result, errors.New("insufficient data for return value 3")
 	}
-	result.AddressVal = decodeAddress(data[offset : offset+32])
+	{
+		v, e := decodeAddress(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 3: %w", e)
+		}
+		result.AddressVal = v
+	}
 	offset += 32
-	// Unsupported multi-return type: string
-	panic("unsupported multi-return type: string")
-	return result
+	{
+		ptr, e := readOffset(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 4: %w", e)
+		}
+		s, _, e2 := decodeString(data, ptr)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value 4: %w", e2)
+		}
+		result.StringVal = s
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for getStructTypes method
 func (m *GetStructTypesMethod) Decode(data []byte) (GetStructTypesResult, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for getStructTypes method
 func (m *GetStructTypesMethod) MustDecode(data []byte) GetStructTypesResult {
-	return m.mustDecodeImpl(data)
-}
-
-// mustDecodeImpl contains the actual decode logic
-func (m *GetStructTypesMethod) mustDecodeImpl(data []byte) GetStructTypesResult {
-	// Multiple return values - return as struct
-	result := GetStructTypesResult{}
-	offset := 0
-	// Unsupported multi-return type: Struct
-	panic("unsupported multi-return type: Struct")
-	// Custom struct array type for multi-return: []Struct
-	if len(data) < offset+32 {
-		panic("insufficient data for struct array length in return value 1")
-	}
-	lengthBig := mustDecodeUint256(data[offset : offset+32])
-	if !lengthBig.IsUint64() {
-		panic("struct array length too large in return value 1")
-	}
-	length := int(lengthBig.Uint64())
-	offset += 32
-
-	elemTypeName := "[]Struct"[2:] // Remove "[]" prefix
-	if elemTypeName == "Struct" {
-		result.Structs = make([]Struct, length)
-		for i := 0; i < length; i++ {
-			var nextOffset int
-			result.Structs[i], nextOffset = decodeStruct(data, offset)
-			offset = nextOffset
-		}
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
 	}
 	return result
+}
+
+// decodeImpl contains the actual decode logic
+func (m *GetStructTypesMethod) decodeImpl(data []byte) (GetStructTypesResult, error) {
+	// Multiple return values - return as struct
+	var result GetStructTypesResult
+	offset := 0
+	{
+		v, no, e := decodeStruct(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 0: %w", e)
+		}
+		result.Simple = v
+		offset = no
+	}
+	{
+		arrayOffset, e := readOffset(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 1: %w", e)
+		}
+		length, e2 := readOffset(data, arrayOffset)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding return value 1 length: %w", e2)
+		}
+		arr := make([]Struct, length)
+		elemOff := arrayOffset + 32
+		for i := 0; i < length; i++ {
+			v, no, e3 := decodeStruct(data, elemOff)
+			if e3 != nil {
+				return result, fmt.Errorf("decoding return value 1 element %d: %w", i, e3)
+			}
+			arr[i] = v
+			elemOff = no
+		}
+		result.Structs = arr
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for largeNumbers method
 func (m *LargeNumbersMethod) Decode(data []byte) (LargeNumbersResult, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for largeNumbers method
 func (m *LargeNumbersMethod) MustDecode(data []byte) LargeNumbersResult {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *LargeNumbersMethod) mustDecodeImpl(data []byte) LargeNumbersResult {
+// decodeImpl contains the actual decode logic
+func (m *LargeNumbersMethod) decodeImpl(data []byte) (LargeNumbersResult, error) {
 	// Multiple return values - return as struct
-	result := LargeNumbersResult{}
+	var result LargeNumbersResult
 	offset := 0
 	if len(data) < offset+32 {
-		panic("insufficient data for return value 0")
+		return result, errors.New("insufficient data for return value 0")
 	}
-	result.MaxUint256 = mustDecodeUint256(data[offset : offset+32])
+	{
+		v, e := decodeUint256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 0: %w", e)
+		}
+		result.MaxUint256 = v
+	}
 	offset += 32
 	if len(data) < offset+32 {
-		panic("insufficient data for return value 1")
+		return result, errors.New("insufficient data for return value 1")
 	}
-	result.MaxInt256 = mustDecodeInt256(data[offset : offset+32])
+	{
+		v, e := decodeInt256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 1: %w", e)
+		}
+		result.MaxInt256 = v
+	}
 	offset += 32
 	if len(data) < offset+32 {
-		panic("insufficient data for return value 2")
+		return result, errors.New("insufficient data for return value 2")
 	}
-	result.MinInt256 = mustDecodeInt256(data[offset : offset+32])
+	{
+		v, e := decodeInt256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 2: %w", e)
+		}
+		result.MinInt256 = v
+	}
 	offset += 32
-	return result
+	return result, nil
 }
 
 // Decode decodes return values for mixedInputs method
 func (m *MixedInputsMethod) Decode(data []byte) (bool, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := m.mustDecodeImpl(data)
-	return result, nil
+	return m.decodeImpl(data)
 }
 
 // MustDecode decodes return values for mixedInputs method
 func (m *MixedInputsMethod) MustDecode(data []byte) bool {
-	return m.mustDecodeImpl(data)
+	result, err := m.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (m *MixedInputsMethod) mustDecodeImpl(data []byte) bool {
-	// Single return value
-	if len(data) < 32 {
-		panic("insufficient data for return value")
+// decodeImpl contains the actual decode logic
+func (m *MixedInputsMethod) decodeImpl(data []byte) (bool, error) {
+	var result bool
+	offset := 0
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeBool(data[0:32])
+	{
+		v, e := decodeBool(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes log data for ArrayTypesEvent event
 func (e *ArrayTypesEventEventDecoder) Decode(data []byte) (ArrayTypesEventEvent, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := e.mustDecodeImpl(data)
-	return result, nil
+	return e.decodeImpl(data)
 }
 
 // MustDecode decodes log data for ArrayTypesEvent event
 func (e *ArrayTypesEventEventDecoder) MustDecode(data []byte) ArrayTypesEventEvent {
-	return e.mustDecodeImpl(data)
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (e *ArrayTypesEventEventDecoder) mustDecodeImpl(data []byte) ArrayTypesEventEvent {
+// DecodeLog decodes a full log into ArrayTypesEventEvent: non-indexed parameters are
+// read from data, while indexed parameters are read from topics (topics[0] is the
+// event signature, so indexed params start at topics[1]) in ABI order.
+//
+// Indexed dynamic types (string, bytes, arrays) are stored as the keccak hash of
+// their value in the topic and cannot be recovered to their original value; such
+// fields are left at their zero value.
+func (e *ArrayTypesEventEventDecoder) DecodeLog(topics [][32]byte, data []byte) (ArrayTypesEventEvent, error) {
+	// Non-indexed parameters live in the data section.
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// decodeImpl contains the actual decode logic
+func (e *ArrayTypesEventEventDecoder) decodeImpl(data []byte) (ArrayTypesEventEvent, error) {
 	// Decode event parameters (only non-indexed parameters are in data)
-	result := ArrayTypesEventEvent{}
+	var result ArrayTypesEventEvent
 	offset := 0
-	// Unsupported event parameter type: []*big.Int
-	panic("unsupported event parameter type: []*big.Int")
-	// Unsupported event parameter type: []*big.Int
-	panic("unsupported event parameter type: []*big.Int")
-	// Unsupported event parameter type: []Address
-	panic("unsupported event parameter type: []Address")
-	return result
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeUint256)
+		if e != nil {
+			return result, fmt.Errorf("decoding event parameter uints: %w", e)
+		}
+		result.Uints = s
+	}
+	offset += 32
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeInt256)
+		if e != nil {
+			return result, fmt.Errorf("decoding event parameter ints: %w", e)
+		}
+		result.Ints = s
+	}
+	offset += 32
+	{
+		s, e := decodeStaticSliceAt(data, offset, decodeAddress)
+		if e != nil {
+			return result, fmt.Errorf("decoding event parameter addresses: %w", e)
+		}
+		result.Addresses = s
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes log data for BasicTypesEvent event
 func (e *BasicTypesEventEventDecoder) Decode(data []byte) (BasicTypesEventEvent, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := e.mustDecodeImpl(data)
-	return result, nil
+	return e.decodeImpl(data)
 }
 
 // MustDecode decodes log data for BasicTypesEvent event
 func (e *BasicTypesEventEventDecoder) MustDecode(data []byte) BasicTypesEventEvent {
-	return e.mustDecodeImpl(data)
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (e *BasicTypesEventEventDecoder) mustDecodeImpl(data []byte) BasicTypesEventEvent {
+// DecodeLog decodes a full log into BasicTypesEventEvent: non-indexed parameters are
+// read from data, while indexed parameters are read from topics (topics[0] is the
+// event signature, so indexed params start at topics[1]) in ABI order.
+//
+// Indexed dynamic types (string, bytes, arrays) are stored as the keccak hash of
+// their value in the topic and cannot be recovered to their original value; such
+// fields are left at their zero value.
+func (e *BasicTypesEventEventDecoder) DecodeLog(topics [][32]byte, data []byte) (BasicTypesEventEvent, error) {
+	// Non-indexed parameters live in the data section.
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		return result, err
+	}
+	// Indexed parameters live in the log topics, after the signature topic.
+	topicIndex := 1
+	if len(topics) <= topicIndex {
+		return result, errors.New("missing topic for indexed parameter boolVal")
+	}
+	{
+		word := topics[topicIndex][:]
+		v, e := decodeBool(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter boolVal: %w", e)
+		}
+		result.BoolVal = v
+	}
+	topicIndex++
+	if len(topics) <= topicIndex {
+		return result, errors.New("missing topic for indexed parameter uintVal")
+	}
+	{
+		word := topics[topicIndex][:]
+		v, e := decodeUint256(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter uintVal: %w", e)
+		}
+		result.UintVal = v
+	}
+	topicIndex++
+	return result, nil
+}
+
+// decodeImpl contains the actual decode logic
+func (e *BasicTypesEventEventDecoder) decodeImpl(data []byte) (BasicTypesEventEvent, error) {
 	// Decode event parameters (only non-indexed parameters are in data)
-	result := BasicTypesEventEvent{}
+	var result BasicTypesEventEvent
 	offset := 0
 	if len(data) < offset+32 {
-		panic("insufficient data for event parameter intVal")
+		return result, errors.New("insufficient data for event parameter intVal")
 	}
-	result.IntVal = mustDecodeInt256(data[offset : offset+32])
+	{
+		v, e := decodeInt256(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding event parameter intVal: %w", e)
+		}
+		result.IntVal = v
+	}
 	offset += 32
 	if len(data) < offset+32 {
-		panic("insufficient data for event parameter addressVal")
+		return result, errors.New("insufficient data for event parameter addressVal")
 	}
-	result.AddressVal = decodeAddress(data[offset : offset+32])
+	{
+		v, e := decodeAddress(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding event parameter addressVal: %w", e)
+		}
+		result.AddressVal = v
+	}
 	offset += 32
-	var nextOffset int
-	result.StringVal, nextOffset = decodeString(data, offset)
-	offset = nextOffset
-	return result
+	{
+		ptr, e := readOffset(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding event parameter stringVal: %w", e)
+		}
+		s, _, e2 := decodeString(data, ptr)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding event parameter stringVal: %w", e2)
+		}
+		result.StringVal = s
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes log data for StructTypesEvent event
 func (e *StructTypesEventEventDecoder) Decode(data []byte) (StructTypesEventEvent, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := e.mustDecodeImpl(data)
-	return result, nil
+	return e.decodeImpl(data)
 }
 
 // MustDecode decodes log data for StructTypesEvent event
 func (e *StructTypesEventEventDecoder) MustDecode(data []byte) StructTypesEventEvent {
-	return e.mustDecodeImpl(data)
-}
-
-// mustDecodeImpl contains the actual decode logic
-func (e *StructTypesEventEventDecoder) mustDecodeImpl(data []byte) StructTypesEventEvent {
-	// Decode event parameters (only non-indexed parameters are in data)
-	result := StructTypesEventEvent{}
-	offset := 0
-	// Unsupported event parameter type: Struct
-	panic("unsupported event parameter type: Struct")
-	// Custom struct array type for event: []Struct
-	if len(data) < offset+32 {
-		panic("insufficient data for struct array length in event parameter structs")
-	}
-	lengthBig := mustDecodeUint256(data[offset : offset+32])
-	if !lengthBig.IsUint64() {
-		panic("struct array length too large in event parameter structs")
-	}
-	length := int(lengthBig.Uint64())
-	offset += 32
-
-	elemTypeName := "[]Struct"[2:] // Remove "[]" prefix
-	if elemTypeName == "Struct" {
-		result.Structs = make([]Struct, length)
-		for i := 0; i < length; i++ {
-			var nextOffset int
-			result.Structs[i], nextOffset = decodeStruct(data, offset)
-			offset = nextOffset
-		}
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		panic(err)
 	}
 	return result
+}
+
+// DecodeLog decodes a full log into StructTypesEventEvent: non-indexed parameters are
+// read from data, while indexed parameters are read from topics (topics[0] is the
+// event signature, so indexed params start at topics[1]) in ABI order.
+//
+// Indexed dynamic types (string, bytes, arrays) are stored as the keccak hash of
+// their value in the topic and cannot be recovered to their original value; such
+// fields are left at their zero value.
+func (e *StructTypesEventEventDecoder) DecodeLog(topics [][32]byte, data []byte) (StructTypesEventEvent, error) {
+	// Non-indexed parameters live in the data section.
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// decodeImpl contains the actual decode logic
+func (e *StructTypesEventEventDecoder) decodeImpl(data []byte) (StructTypesEventEvent, error) {
+	// Decode event parameters (only non-indexed parameters are in data)
+	var result StructTypesEventEvent
+	offset := 0
+	{
+		v, no, e := decodeStruct(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding event parameter simple: %w", e)
+		}
+		result.Simple = v
+		offset = no
+	}
+	{
+		arrayOffset, e := readOffset(data, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding event parameter structs: %w", e)
+		}
+		length, e2 := readOffset(data, arrayOffset)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding event parameter structs length: %w", e2)
+		}
+		arr := make([]Struct, length)
+		elemOff := arrayOffset + 32
+		for i := 0; i < length; i++ {
+			v, no, e3 := decodeStruct(data, elemOff)
+			if e3 != nil {
+				return result, fmt.Errorf("decoding event parameter structs element %d: %w", i, e3)
+			}
+			arr[i] = v
+			elemOff = no
+		}
+		result.Structs = arr
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes error data for ArrayError error
 func (e *ArrayErrorErrorDecoder) Decode(data []byte) (ArrayErrorError, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := e.mustDecodeImpl(data)
-	return result, nil
+	return e.decodeImpl(data)
 }
 
 // MustDecode decodes error data for ArrayError error
 func (e *ArrayErrorErrorDecoder) MustDecode(data []byte) ArrayErrorError {
-	return e.mustDecodeImpl(data)
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (e *ArrayErrorErrorDecoder) mustDecodeImpl(data []byte) ArrayErrorError {
+// decodeImpl contains the actual decode logic
+func (e *ArrayErrorErrorDecoder) decodeImpl(data []byte) (ArrayErrorError, error) {
 	// Skip the 4-byte selector
 	if len(data) < 4 {
-		panic("insufficient data for error selector")
+		return ArrayErrorError{}, errors.New("insufficient data for error selector")
 	}
+	var result ArrayErrorError
 	errorData := data[4:]
-	// Decode error parameters
-	result := ArrayErrorError{}
 	offset := 0
-	// Unsupported error parameter type: []*big.Int
-	panic("unsupported error parameter type: []*big.Int")
-	// Unsupported error parameter type: []Address
-	panic("unsupported error parameter type: []Address")
-	return result
+	{
+		s, e := decodeStaticSliceAt(errorData, offset, decodeUint256)
+		if e != nil {
+			return result, fmt.Errorf("decoding error parameter values: %w", e)
+		}
+		result.Values = s
+	}
+	offset += 32
+	{
+		s, e := decodeStaticSliceAt(errorData, offset, decodeAddress)
+		if e != nil {
+			return result, fmt.Errorf("decoding error parameter users: %w", e)
+		}
+		result.Users = s
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes error data for DataTypesError error
 func (e *DataTypesErrorErrorDecoder) Decode(data []byte) (DataTypesErrorError, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := e.mustDecodeImpl(data)
-	return result, nil
+	return e.decodeImpl(data)
 }
 
 // MustDecode decodes error data for DataTypesError error
 func (e *DataTypesErrorErrorDecoder) MustDecode(data []byte) DataTypesErrorError {
-	return e.mustDecodeImpl(data)
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (e *DataTypesErrorErrorDecoder) mustDecodeImpl(data []byte) DataTypesErrorError {
+// decodeImpl contains the actual decode logic
+func (e *DataTypesErrorErrorDecoder) decodeImpl(data []byte) (DataTypesErrorError, error) {
 	// Skip the 4-byte selector
 	if len(data) < 4 {
-		panic("insufficient data for error selector")
+		return DataTypesErrorError{}, errors.New("insufficient data for error selector")
 	}
+	var result DataTypesErrorError
 	errorData := data[4:]
-	// Decode error parameters
-	result := DataTypesErrorError{}
 	offset := 0
 	if len(errorData) < offset+32 {
-		panic("insufficient data for error parameter code")
+		return result, errors.New("insufficient data for error parameter code")
 	}
-	result.Code = mustDecodeUint256(errorData[offset : offset+32])
+	{
+		v, e := decodeUint256(errorData[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding error parameter code: %w", e)
+		}
+		result.Code = v
+	}
 	offset += 32
 	if len(errorData) < offset+32 {
-		panic("insufficient data for error parameter value")
+		return result, errors.New("insufficient data for error parameter value")
 	}
-	result.Value = mustDecodeInt256(errorData[offset : offset+32])
+	{
+		v, e := decodeInt256(errorData[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding error parameter value: %w", e)
+		}
+		result.Value = v
+	}
 	offset += 32
 	if len(errorData) < offset+32 {
-		panic("insufficient data for error parameter user")
+		return result, errors.New("insufficient data for error parameter user")
 	}
-	result.User = decodeAddress(errorData[offset : offset+32])
+	{
+		v, e := decodeAddress(errorData[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding error parameter user: %w", e)
+		}
+		result.User = v
+	}
 	offset += 32
 	if len(errorData) < offset+32 {
-		panic("insufficient data for error parameter flag")
+		return result, errors.New("insufficient data for error parameter flag")
 	}
-	result.Flag = decodeBool(errorData[offset : offset+32])
+	{
+		v, e := decodeBool(errorData[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding error parameter flag: %w", e)
+		}
+		result.Flag = v
+	}
 	offset += 32
-	return result
+	return result, nil
 }
 
 // Decode decodes error data for SimpleError error
 func (e *SimpleErrorErrorDecoder) Decode(data []byte) (SimpleErrorError, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := e.mustDecodeImpl(data)
-	return result, nil
+	return e.decodeImpl(data)
 }
 
 // MustDecode decodes error data for SimpleError error
 func (e *SimpleErrorErrorDecoder) MustDecode(data []byte) SimpleErrorError {
-	return e.mustDecodeImpl(data)
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (e *SimpleErrorErrorDecoder) mustDecodeImpl(data []byte) SimpleErrorError {
+// decodeImpl contains the actual decode logic
+func (e *SimpleErrorErrorDecoder) decodeImpl(data []byte) (SimpleErrorError, error) {
 	// Skip the 4-byte selector
 	if len(data) < 4 {
-		panic("insufficient data for error selector")
+		return SimpleErrorError{}, errors.New("insufficient data for error selector")
 	}
+	var result SimpleErrorError
 	errorData := data[4:]
-	// Decode error parameters
-	result := SimpleErrorError{}
 	offset := 0
-	var nextOffset int
-	result.Message, nextOffset = decodeString(errorData, offset)
-	offset = nextOffset
-	return result
+	{
+		ptr, e := readOffset(errorData, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding error parameter message: %w", e)
+		}
+		s, _, e2 := decodeString(errorData, ptr)
+		if e2 != nil {
+			return result, fmt.Errorf("decoding error parameter message: %w", e2)
+		}
+		result.Message = s
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes error data for StructError error
 func (e *StructErrorErrorDecoder) Decode(data []byte) (StructErrorError, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panic(r) // Re-panic to maintain original error behavior during transition
-		}
-	}()
-
-	result := e.mustDecodeImpl(data)
-	return result, nil
+	return e.decodeImpl(data)
 }
 
 // MustDecode decodes error data for StructError error
 func (e *StructErrorErrorDecoder) MustDecode(data []byte) StructErrorError {
-	return e.mustDecodeImpl(data)
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
-// mustDecodeImpl contains the actual decode logic
-func (e *StructErrorErrorDecoder) mustDecodeImpl(data []byte) StructErrorError {
+// decodeImpl contains the actual decode logic
+func (e *StructErrorErrorDecoder) decodeImpl(data []byte) (StructErrorError, error) {
 	// Skip the 4-byte selector
 	if len(data) < 4 {
-		panic("insufficient data for error selector")
+		return StructErrorError{}, errors.New("insufficient data for error selector")
 	}
+	var result StructErrorError
 	errorData := data[4:]
-	// Decode error parameters
-	result := StructErrorError{}
 	offset := 0
-	// Unsupported error parameter type: Struct
-	panic("unsupported error parameter type: Struct")
-	if len(errorData) < offset+32 {
-		panic("insufficient data for error parameter timestamp")
+	{
+		v, no, e := decodeStruct(errorData, offset)
+		if e != nil {
+			return result, fmt.Errorf("decoding error parameter data: %w", e)
+		}
+		result.Data = v
+		offset = no
 	}
-	result.Timestamp = mustDecodeUint256(errorData[offset : offset+32])
+	if len(errorData) < offset+32 {
+		return result, errors.New("insufficient data for error parameter timestamp")
+	}
+	{
+		v, e := decodeUint256(errorData[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding error parameter timestamp: %w", e)
+		}
+		result.Timestamp = v
+	}
 	offset += 32
-	return result
+	return result, nil
 }

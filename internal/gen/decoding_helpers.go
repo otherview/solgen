@@ -162,6 +162,68 @@ func decodeBoolArrayElement(data []byte) (interface{}, error) {
 	return decodeBool(data)
 }
 
+// readOffset reads a 32-byte ABI offset/length word at head position pos and
+// returns it as an int.
+func readOffset(data []byte, pos int) (int, error) {
+	if len(data) < pos+32 {
+		return 0, errors.New("insufficient data for offset pointer")
+	}
+	p, err := decodeUint256(data[pos : pos+32])
+	if err != nil {
+		return 0, fmt.Errorf("decoding offset pointer: %w", err)
+	}
+	if !p.IsUint64() {
+		return 0, errors.New("offset pointer too large")
+	}
+	return int(p.Uint64()), nil
+}
+
+// decodeStaticSliceAt decodes a dynamic array of static (32-byte) elements. pos
+// is the head position holding the offset pointer to the array data; dec decodes
+// a single element from its 32-byte word.
+func decodeStaticSliceAt[T any](data []byte, pos int, dec func([]byte) (T, error)) ([]T, error) {
+	arrPos, err := readOffset(data, pos)
+	if err != nil {
+		return nil, err
+	}
+	length, err := readOffset(data, arrPos)
+	if err != nil {
+		return nil, fmt.Errorf("decoding array length: %w", err)
+	}
+	out := make([]T, length)
+	cur := arrPos + 32
+	for i := 0; i < length; i++ {
+		if len(data) < cur+32 {
+			return nil, fmt.Errorf("insufficient data for array element %d", i)
+		}
+		v, err := dec(data[cur : cur+32])
+		if err != nil {
+			return nil, fmt.Errorf("decoding array element %d: %w", i, err)
+		}
+		out[i] = v
+		cur += 32
+	}
+	return out, nil
+}
+
+// decodeStaticFixedArray decodes size consecutive static (32-byte) elements
+// starting at pos into a slice; the caller copies it into the fixed-size [N]T
+// value. dec decodes a single element from its 32-byte word.
+func decodeStaticFixedArray[T any](data []byte, pos, size int, dec func([]byte) (T, error)) ([]T, error) {
+	out := make([]T, size)
+	for i := 0; i < size; i++ {
+		if len(data) < pos+(i+1)*32 {
+			return nil, fmt.Errorf("insufficient data for fixed array element %d", i)
+		}
+		v, err := dec(data[pos+i*32 : pos+(i+1)*32])
+		if err != nil {
+			return nil, fmt.Errorf("decoding fixed array element %d: %w", i, err)
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
 // decodeUint8 decodes a uint8 from 32 bytes
 func decodeUint8(data []byte) (uint8, error) {
 	if len(data) < 32 {

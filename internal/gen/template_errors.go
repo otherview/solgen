@@ -2,7 +2,8 @@
 
 package gen
 
-// errorDecodersTemplate generates error decoder functions
+// errorDecodersTemplate generates error decoder functions. Parameters are
+// decoded via the shared "decodeValue" template.
 const errorDecodersTemplate = `{{/* Generate type-specific decoders for errors */}}
 {{- range .Contract.Errors}}
 
@@ -26,91 +27,21 @@ func (e *{{.Name}}ErrorDecoder) decodeImpl(data []byte) ({{.Struct.Name}}, error
 	if len(data) < 4 {
 		return {{.Struct.Name}}{}, errors.New("insufficient data for error selector")
 	}
-	errorData := data[4:]
-	// Decode error parameters
 	var result {{.Struct.Name}}
-{{- if gt (len .Inputs) 0}}
-	var err error
+	{{- $allSupported := true}}
+	{{- range .Inputs}}{{- if not (decoderSupports .Type)}}{{- $allSupported = false}}{{- end}}{{- end}}
+	{{- if not $allSupported}}
+	return result, errors.New("unsupported parameter type in {{.Name}} error")
+	{{- else}}
+	{{- if gt (len .Inputs) 0}}
+	errorData := data[4:]
 	offset := 0
 	{{- range $i, $input := .Inputs}}
-	{{- if eq $input.Type.TypeName "*big.Int"}}
-	if len(errorData) < offset+32 {
-		return result, errors.New("insufficient data for error parameter {{$input.Name}}")
-	}
-	{{- if $input.Type.IsSigned}}
-	val{{$i}}, err := decodeInt256(errorData[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding error parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val{{$i}}
-	{{- else}}
-	val{{$i}}, err := decodeUint256(errorData[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding error parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val{{$i}}
-	{{- end}}
-	offset += 32
-	{{- else if eq $input.Type.TypeName "uint64"}}
-	if len(errorData) < offset+32 {
-		return result, errors.New("insufficient data for error parameter {{$input.Name}}")
-	}
-	val{{$i}}, err := decodeUint64(errorData[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding error parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val{{$i}}
-	offset += 32
-	{{- else if eq $input.Type.TypeName "int64"}}
-	if len(errorData) < offset+32 {
-		return result, errors.New("insufficient data for error parameter {{$input.Name}}")
-	}
-	val{{$i}}, err := decodeInt64(errorData[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding error parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val{{$i}}
-	offset += 32
-	{{- else if eq $input.Type.TypeName "bool"}}
-	if len(errorData) < offset+32 {
-		return result, errors.New("insufficient data for error parameter {{$input.Name}}")
-	}
-	val{{$i}}, err := decodeBool(errorData[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding error parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val{{$i}}
-	offset += 32
-	{{- else if eq $input.Type.TypeName "Address"}}
-	if len(errorData) < offset+32 {
-		return result, errors.New("insufficient data for error parameter {{$input.Name}}")
-	}
-	val{{$i}}, err := decodeAddress(errorData[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding error parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val{{$i}}
-	offset += 32
-	{{- else if eq $input.Type.TypeName "string"}}
-	val{{$i}}, nextOffset, err := decodeString(errorData, offset)
-	if err != nil {
-		return result, fmt.Errorf("decoding error parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val{{$i}}
-	offset = nextOffset
-	{{- else if eq $input.Type.TypeName "[]byte"}}
-	val{{$i}}, nextOffset, err := decodeBytes(errorData, offset)
-	if err != nil {
-		return result, fmt.Errorf("decoding error parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val{{$i}}
-	offset = nextOffset
-	{{- else}}
-	return result, errors.New("unsupported error parameter type: {{$input.Type.TypeName}}")
+	{{- template "decodeValue" (dict "Data" "errorData" "Field" (printf "result.%s" ($input.Name | title)) "T" $input.Type "Ctx" (printf "error parameter %s" $input.Name) "Zero" "result")}}
 	{{- end}}
 	{{- end}}
-{{- end}}
 	return result, nil
+	{{- end}}
 }
 {{- end}}`
 

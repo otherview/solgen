@@ -15,6 +15,17 @@ import (
 	"github.com/otherview/solgen/internal/types"
 )
 
+// goBuildDir runs `go build ./...` in dir (which must contain its own go.mod).
+func goBuildDir(t *testing.T, dir string) error {
+	t.Helper()
+	cmd := exec.Command("go", "build", "./...")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("go build failed: %v\nOutput: %s", err, string(out))
+	}
+	return nil
+}
+
 // processCombinedJSON parses combined JSON format and returns contracts
 func processCombinedJSON(data []byte) ([]*types.Contract, error) {
 	var combined types.CombinedJSON

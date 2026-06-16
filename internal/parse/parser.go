@@ -455,6 +455,7 @@ func mapSolidityToGoType(abiType abi.Type) (types.GoType, error) {
 			Import:   elemType.Import,
 			TypeName: "[]" + elemType.TypeName,
 			IsSlice:  true,
+			ElemType: &elemType,
 		}, nil
 
 	case abi.ArrayTy:
@@ -463,8 +464,11 @@ func mapSolidityToGoType(abiType abi.Type) (types.GoType, error) {
 			return types.GoType{}, fmt.Errorf("mapping array element type: %w", err)
 		}
 		return types.GoType{
-			Import:   elemType.Import,
-			TypeName: fmt.Sprintf("[%d]%s", abiType.Size, elemType.TypeName),
+			Import:    elemType.Import,
+			TypeName:  fmt.Sprintf("[%d]%s", abiType.Size, elemType.TypeName),
+			IsArray:   true,
+			ArraySize: abiType.Size,
+			ElemType:  &elemType,
 		}, nil
 
 	case abi.TupleTy:
@@ -528,6 +532,7 @@ func mapSolidityToGoTypeWithRegistry(abiType abi.Type, registry *structRegistry)
 			Import:   elemType.Import,
 			TypeName: "[]" + elemType.TypeName,
 			IsSlice:  true,
+			ElemType: &elemType,
 		}, nil
 	case abi.ArrayTy:
 		elemType, err := mapSolidityToGoTypeWithRegistry(*abiType.Elem, registry)
@@ -535,8 +540,11 @@ func mapSolidityToGoTypeWithRegistry(abiType abi.Type, registry *structRegistry)
 			return types.GoType{}, fmt.Errorf("mapping array element type: %w", err)
 		}
 		return types.GoType{
-			Import:   elemType.Import,
-			TypeName: fmt.Sprintf("[%d]%s", abiType.Size, elemType.TypeName),
+			Import:    elemType.Import,
+			TypeName:  fmt.Sprintf("[%d]%s", abiType.Size, elemType.TypeName),
+			IsArray:   true,
+			ArraySize: abiType.Size,
+			ElemType:  &elemType,
 		}, nil
 	case abi.TupleTy:
 		// Extract struct name and register the struct definition
