@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"reflect"
 	"strings"
 )
 
@@ -134,30 +135,29 @@ func encodeUint256(val interface{}) ([]byte, error) {
 	}
 }
 
-// encodeInt256 encodes a signed 256-bit integer to 32 bytes using two's complement
+// encodeInt256 encodes a signed 256-bit integer to 32 bytes using two's complement.
+// Valid range: [-2^255, 2^255-1].
 func encodeInt256(val interface{}) ([]byte, error) {
 	result := make([]byte, 32)
 	switch v := val.(type) {
 	case *big.Int:
-		// Check if value fits in 256 bits (considering sign)
-		if v.BitLen() >= 256 {
-			return nil, errors.New("value too large for int256")
-		}
-
 		if v.Sign() >= 0 {
-			// Positive number - same as uint256
+			// Positive: valid range [0, 2^255-1] → BitLen must be ≤ 255.
+			if v.BitLen() > 255 {
+				return nil, errors.New("value too large for int256")
+			}
 			v.FillBytes(result)
 		} else {
-			// Negative number - use two's complement
-			// Create a 256-bit mask (all 1s)
-			mask := new(big.Int).Lsh(big.NewInt(1), 256)
-			mask.Sub(mask, big.NewInt(1))
-
-			// Get absolute value, subtract 1, XOR with mask
+			// Negative: valid range [-2^255, -1].
+			// abs(-2^255) has BitLen == 256, which is the boundary.
 			abs := new(big.Int).Neg(v)
-			abs.Sub(abs, big.NewInt(1))
-			abs.Xor(abs, mask)
-			abs.FillBytes(result)
+			minNeg := new(big.Int).Lsh(big.NewInt(1), 255) // 2^255
+			if abs.Cmp(minNeg) > 0 {
+				return nil, errors.New("value too small for int256")
+			}
+			// Two's-complement: compute 2^256 + v = 2^256 - abs(v).
+			mask := new(big.Int).Lsh(big.NewInt(1), 256)
+			new(big.Int).Add(mask, v).FillBytes(result)
 		}
 		return result, nil
 	case int64:
@@ -205,6 +205,104 @@ func encodeBytes(data []byte) ([]byte, error) {
 // encodeString encodes a string as dynamic bytes
 func encodeString(str string) ([]byte, error) {
 	return encodeBytes([]byte(str))
+}
+
+// encodeFixedBytes encodes fixed-size bytes (e.g., bytes32) as a single static
+// 32-byte word: the value is left-aligned and right-padded with zeros.
+func encodeFixedBytes(val []byte, size int) ([]byte, error) {
+	if size < 1 || size > 32 {
+		return nil, fmt.Errorf("invalid fixed bytes size: %d", size)
+	}
+	if len(val) != size {
+		return nil, fmt.Errorf("fixed bytes length mismatch: got %d, want %d", len(val), size)
+	}
+	result := make([]byte, 32)
+	copy(result, val)
+	return result, nil
+}
+
+// encodeArg encodes a single ABI argument, returning its encoded bytes and
+// whether it is a dynamic type (which gets a 32-byte offset pointer in the head
+// and its data in the tail). It is the per-argument core shared by Pack.
+func encodeArg(arg any) ([]byte, bool, error) {
+	switch v := arg.(type) {
+	case *big.Int:
+		if v.Sign() < 0 {
+			d, err := encodeInt256(v)
+			return d, false, err
+		}
+		d, err := encodeUint256(v)
+		return d, false, err
+	case uint8:
+		d, err := encodeUint256(uint64(v))
+		return d, false, err
+	case uint16:
+		d, err := encodeUint256(uint64(v))
+		return d, false, err
+	case uint32:
+		d, err := encodeUint256(uint64(v))
+		return d, false, err
+	case uint64:
+		d, err := encodeUint256(v)
+		return d, false, err
+	case int8:
+		d, err := encodeInt256(big.NewInt(int64(v)))
+		return d, false, err
+	case int16:
+		d, err := encodeInt256(big.NewInt(int64(v)))
+		return d, false, err
+	case int32:
+		d, err := encodeInt256(big.NewInt(int64(v)))
+		return d, false, err
+	case int64:
+		d, err := encodeInt256(big.NewInt(v))
+		return d, false, err
+	case Address:
+		d, err := encodeAddress(v)
+		return d, false, err
+	case bool:
+		d, err := encodeBool(v)
+		return d, false, err
+	case string:
+		d, err := encodeString(v)
+		return d, true, err
+	case []byte:
+		d, err := encodeBytes(v)
+		return d, true, err
+	case Hash:
+		d, err := encodeFixedBytes(v[:], 32)
+		return d, false, err
+	case [32]byte:
+		d, err := encodeFixedBytes(v[:], 32)
+		return d, false, err
+	default:
+		rt := reflect.TypeOf(arg)
+		if rt != nil && rt.Kind() == reflect.Array {
+			// Fixed-size byte array bytesN (1 <= N <= 32): one static word.
+			if rt.Elem().Kind() == reflect.Uint8 && rt.Len() <= 32 {
+				rv := reflect.ValueOf(arg)
+				b := make([]byte, rv.Len())
+				reflect.Copy(reflect.ValueOf(b), rv)
+				d, err := encodeFixedBytes(b, len(b))
+				return d, false, err
+			}
+			// Fixed-size array [N]T of static elements: N inline static words.
+			rv := reflect.ValueOf(arg)
+			var out []byte
+			for i := 0; i < rv.Len(); i++ {
+				elemData, elemDynamic, err := encodeArg(rv.Index(i).Interface())
+				if err != nil {
+					return nil, false, fmt.Errorf("encoding array element %d: %w", i, err)
+				}
+				if elemDynamic {
+					return nil, false, fmt.Errorf("unsupported dynamic element in fixed-size array: %T", arg)
+				}
+				out = append(out, elemData...)
+			}
+			return out, false, nil
+		}
+		return nil, false, fmt.Errorf("unsupported argument type: %T", arg)
+	}
 }
 
 // ABI Decoding Implementation
@@ -366,6 +464,68 @@ func decodeBoolArrayElement(data []byte) (interface{}, error) {
 	return decodeBool(data)
 }
 
+// readOffset reads a 32-byte ABI offset/length word at head position pos and
+// returns it as an int.
+func readOffset(data []byte, pos int) (int, error) {
+	if len(data) < pos+32 {
+		return 0, errors.New("insufficient data for offset pointer")
+	}
+	p, err := decodeUint256(data[pos : pos+32])
+	if err != nil {
+		return 0, fmt.Errorf("decoding offset pointer: %w", err)
+	}
+	if !p.IsUint64() {
+		return 0, errors.New("offset pointer too large")
+	}
+	return int(p.Uint64()), nil
+}
+
+// decodeStaticSliceAt decodes a dynamic array of static (32-byte) elements. pos
+// is the head position holding the offset pointer to the array data; dec decodes
+// a single element from its 32-byte word.
+func decodeStaticSliceAt[T any](data []byte, pos int, dec func([]byte) (T, error)) ([]T, error) {
+	arrPos, err := readOffset(data, pos)
+	if err != nil {
+		return nil, err
+	}
+	length, err := readOffset(data, arrPos)
+	if err != nil {
+		return nil, fmt.Errorf("decoding array length: %w", err)
+	}
+	out := make([]T, length)
+	cur := arrPos + 32
+	for i := 0; i < length; i++ {
+		if len(data) < cur+32 {
+			return nil, fmt.Errorf("insufficient data for array element %d", i)
+		}
+		v, err := dec(data[cur : cur+32])
+		if err != nil {
+			return nil, fmt.Errorf("decoding array element %d: %w", i, err)
+		}
+		out[i] = v
+		cur += 32
+	}
+	return out, nil
+}
+
+// decodeStaticFixedArray decodes size consecutive static (32-byte) elements
+// starting at pos into a slice; the caller copies it into the fixed-size [N]T
+// value. dec decodes a single element from its 32-byte word.
+func decodeStaticFixedArray[T any](data []byte, pos, size int, dec func([]byte) (T, error)) ([]T, error) {
+	out := make([]T, size)
+	for i := 0; i < size; i++ {
+		if len(data) < pos+(i+1)*32 {
+			return nil, fmt.Errorf("insufficient data for fixed array element %d", i)
+		}
+		v, err := dec(data[pos+i*32 : pos+(i+1)*32])
+		if err != nil {
+			return nil, fmt.Errorf("decoding fixed array element %d: %w", i, err)
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
 // decodeUint8 decodes a uint8 from 32 bytes
 func decodeUint8(data []byte) (uint8, error) {
 	if len(data) < 32 {
@@ -430,37 +590,32 @@ func decodeUint64(data []byte) (uint64, error) {
 	return result, nil
 }
 
-// decodeInt64 decodes a int64 from 32 bytes
+// decodeInt64 decodes an int64 from 32 bytes (ABI sign-extended big-endian).
 func decodeInt64(data []byte) (int64, error) {
 	if len(data) < 32 {
 		return 0, errors.New("insufficient data for int64")
 	}
 
-	// Check if this is a negative number (MSB set)
+	// ABI sign-extension: bytes 0-23 must all match the sign byte
+	// (0x00 for non-negative, 0xFF for negative).
 	isNegative := data[0]&0x80 != 0
-
-	// Verify upper bytes are consistent (all 0s or all 1s for sign extension)
 	expectedByte := byte(0)
 	if isNegative {
 		expectedByte = 0xFF
 	}
-
 	for i := 0; i < 24; i++ {
 		if data[i] != expectedByte {
 			return 0, errors.New("value exceeds int64 range")
 		}
 	}
 
+	// Assemble the int64 from the last 8 bytes.
+	// Because data[24..31] already hold the correct two's-complement
+	// representation, no further sign extension is needed.
 	var result int64
 	for i := 24; i < 32; i++ {
 		result = (result << 8) | int64(data[i])
 	}
-
-	// Sign extend if necessary
-	if isNegative {
-		result |= ^((1 << 32) - 1) // Set upper 32 bits
-	}
-
 	return result, nil
 }
 
@@ -481,9 +636,7 @@ func decodeString(data []byte, offset int) (string, int, error) {
 		return "", 0, err
 	}
 	return string(bytes), nextOffset, nil
-}
-
-// Method information
+} // Method information
 func GetFirstMethod() MethodInfo {
 	return MethodInfo{
 		Name:      "first",
@@ -565,7 +718,10 @@ type ErrorInfo struct {
 	Selector  HexData
 }
 
-// Pack encodes method arguments and returns the method selector + encoded arguments
+// Pack encodes method arguments and returns the method selector + encoded arguments.
+// Uses ABI head-tail encoding: static args are inlined in the head (32 bytes each);
+// dynamic args (string, []byte) get a 32-byte offset pointer in the head, with
+// their data appended in the tail section.
 func (pm *PackableMethod) Pack(args ...any) (HexData, error) {
 	// Start with the 4-byte method selector
 	selectorBytes := pm.Selector.Bytes()
@@ -578,48 +734,44 @@ func (pm *PackableMethod) Pack(args ...any) (HexData, error) {
 		return pm.Selector, nil
 	}
 
-	// Encode arguments using our ABI implementation
-	var encodedArgs []byte
-	for _, arg := range args {
-		switch v := arg.(type) {
-		case *big.Int:
-			data, err := encodeUint256(v)
+	type argEncoding struct {
+		data      []byte
+		isDynamic bool
+	}
+
+	encoded := make([]argEncoding, len(args))
+	for i, arg := range args {
+		data, dynamic, err := encodeArg(arg)
+		if err != nil {
+			return "", fmt.Errorf("encoding arg %d: %w", i, err)
+		}
+		encoded[i] = argEncoding{data: data, isDynamic: dynamic}
+	}
+
+	// Build ABI head-tail encoding:
+	// Head: static args inlined (32 bytes); dynamic args get a 32-byte offset pointer.
+	// Tail: dynamic args' encoded data appended in order.
+	headSize := len(args) * 32
+	tailOffset := headSize
+
+	var head []byte
+	var tail []byte
+	for _, enc := range encoded {
+		if enc.isDynamic {
+			offsetBytes, err := encodeUint256(uint64(tailOffset))
 			if err != nil {
-				return "", fmt.Errorf("encoding big.Int: %w", err)
+				return "", fmt.Errorf("encoding offset pointer: %w", err)
 			}
-			encodedArgs = append(encodedArgs, data...)
-		case Address:
-			data, err := encodeAddress(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding address: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		case bool:
-			data, err := encodeBool(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding bool: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		case string:
-			data, err := encodeString(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding string: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		case []byte:
-			data, err := encodeBytes(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding bytes: %w", err)
-			}
-			encodedArgs = append(encodedArgs, data...)
-		default:
-			return "", fmt.Errorf("unsupported argument type: %T", arg)
+			head = append(head, offsetBytes...)
+			tail = append(tail, enc.data...)
+			tailOffset += len(enc.data)
+		} else {
+			head = append(head, enc.data...)
 		}
 	}
 
-	// Combine selector and encoded arguments
-	result := hex.EncodeToString(append(selectorBytes, encodedArgs...))
-	return HexData("0x" + result), nil
+	payload := append(selectorBytes, append(head, tail...)...)
+	return HexData("0x" + hex.EncodeToString(payload)), nil
 }
 
 // MustPack encodes method arguments and panics on error
@@ -726,12 +878,20 @@ func (m *FirstMethod) MustDecode(data []byte) Address {
 
 // decodeImpl contains the actual decode logic
 func (m *FirstMethod) decodeImpl(data []byte) (Address, error) {
-	// Single return value - use unified decoding approach
+	var result Address
 	offset := 0
 	if len(data) < offset+32 {
-		return Address{}, errors.New("insufficient data for return value")
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeAddress(data[offset : offset+32])
+	{
+		v, e := decodeAddress(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }
 
 // Decode decodes return values for get method
@@ -752,39 +912,50 @@ func (m *GetMethod) MustDecode(data []byte) GetResult {
 func (m *GetMethod) decodeImpl(data []byte) (GetResult, error) {
 	// Multiple return values - return as struct
 	var result GetResult
-	var valAddr Address
-	var valBool bool
-	var err error
 	offset := 0
 	if len(data) < offset+32 {
 		return result, errors.New("insufficient data for return value 0")
 	}
-	valBool, err = decodeBool(data[offset : offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding return value 0: %w", err)
+	{
+		v, e := decodeBool(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 0: %w", e)
+		}
+		result.Listed = v
 	}
-	result.Listed = valBool
 	offset += 32
 	if len(data) < offset+32 {
 		return result, errors.New("insufficient data for return value 1")
 	}
-	valAddr, err = decodeAddress(data[offset : offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding return value 1: %w", err)
+	{
+		v, e := decodeAddress(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 1: %w", e)
+		}
+		result.Endorsor = v
 	}
-	result.Endorsor = valAddr
 	offset += 32
-	// Handle struct types in multi-return
-	// Handle struct array types in multi-return
-	return result, errors.New("unsupported multi-return type: [32]byte")
+	if len(data) < offset+32 {
+		return result, errors.New("insufficient data for return value 2")
+	}
+	{
+		v, e := decodeBytes32(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 2: %w", e)
+		}
+		result.Identity = v
+	}
+	offset += 32
 	if len(data) < offset+32 {
 		return result, errors.New("insufficient data for return value 3")
 	}
-	valBool, err = decodeBool(data[offset : offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding return value 3: %w", err)
+	{
+		v, e := decodeBool(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value 3: %w", e)
+		}
+		result.Active = v
 	}
-	result.Active = valBool
 	offset += 32
 	return result, nil
 }
@@ -805,10 +976,18 @@ func (m *NextMethod) MustDecode(data []byte) Address {
 
 // decodeImpl contains the actual decode logic
 func (m *NextMethod) decodeImpl(data []byte) (Address, error) {
-	// Single return value - use unified decoding approach
+	var result Address
 	offset := 0
 	if len(data) < offset+32 {
-		return Address{}, errors.New("insufficient data for return value")
+		return result, errors.New("insufficient data for return value")
 	}
-	return decodeAddress(data[offset : offset+32])
+	{
+		v, e := decodeAddress(data[offset : offset+32])
+		if e != nil {
+			return result, fmt.Errorf("decoding return value: %w", e)
+		}
+		result = v
+	}
+	offset += 32
+	return result, nil
 }

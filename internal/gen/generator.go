@@ -99,7 +99,7 @@ func (g *Generator) renderContract(contract *types.Contract) (string, error) {
 // calculateImports determines which imports are needed beyond the base set.
 // The base template already unconditionally imports:
 //
-//	encoding/hex, errors, fmt, math/big, strings
+//	encoding/hex, errors, fmt, math/big, reflect, strings
 //
 // This function only collects additional imports required by custom GoType
 // packages that fall outside that base set.
@@ -110,6 +110,7 @@ func (g *Generator) calculateImports(contract *types.Contract) []string {
 		"errors":       true,
 		"fmt":          true,
 		"math/big":     true,
+		"reflect":      true,
 		"strings":      true,
 	}
 

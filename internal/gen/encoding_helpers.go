@@ -108,4 +108,102 @@ func encodeBytes(data []byte) ([]byte, error) {
 // encodeString encodes a string as dynamic bytes
 func encodeString(str string) ([]byte, error) {
 	return encodeBytes([]byte(str))
+}
+
+// encodeFixedBytes encodes fixed-size bytes (e.g., bytes32) as a single static
+// 32-byte word: the value is left-aligned and right-padded with zeros.
+func encodeFixedBytes(val []byte, size int) ([]byte, error) {
+	if size < 1 || size > 32 {
+		return nil, fmt.Errorf("invalid fixed bytes size: %d", size)
+	}
+	if len(val) != size {
+		return nil, fmt.Errorf("fixed bytes length mismatch: got %d, want %d", len(val), size)
+	}
+	result := make([]byte, 32)
+	copy(result, val)
+	return result, nil
+}
+
+// encodeArg encodes a single ABI argument, returning its encoded bytes and
+// whether it is a dynamic type (which gets a 32-byte offset pointer in the head
+// and its data in the tail). It is the per-argument core shared by Pack.
+func encodeArg(arg any) ([]byte, bool, error) {
+	switch v := arg.(type) {
+	case *big.Int:
+		if v.Sign() < 0 {
+			d, err := encodeInt256(v)
+			return d, false, err
+		}
+		d, err := encodeUint256(v)
+		return d, false, err
+	case uint8:
+		d, err := encodeUint256(uint64(v))
+		return d, false, err
+	case uint16:
+		d, err := encodeUint256(uint64(v))
+		return d, false, err
+	case uint32:
+		d, err := encodeUint256(uint64(v))
+		return d, false, err
+	case uint64:
+		d, err := encodeUint256(v)
+		return d, false, err
+	case int8:
+		d, err := encodeInt256(big.NewInt(int64(v)))
+		return d, false, err
+	case int16:
+		d, err := encodeInt256(big.NewInt(int64(v)))
+		return d, false, err
+	case int32:
+		d, err := encodeInt256(big.NewInt(int64(v)))
+		return d, false, err
+	case int64:
+		d, err := encodeInt256(big.NewInt(v))
+		return d, false, err
+	case Address:
+		d, err := encodeAddress(v)
+		return d, false, err
+	case bool:
+		d, err := encodeBool(v)
+		return d, false, err
+	case string:
+		d, err := encodeString(v)
+		return d, true, err
+	case []byte:
+		d, err := encodeBytes(v)
+		return d, true, err
+	case Hash:
+		d, err := encodeFixedBytes(v[:], 32)
+		return d, false, err
+	case [32]byte:
+		d, err := encodeFixedBytes(v[:], 32)
+		return d, false, err
+	default:
+		rt := reflect.TypeOf(arg)
+		if rt != nil && rt.Kind() == reflect.Array {
+			// Fixed-size byte array bytesN (1 <= N <= 32): one static word.
+			if rt.Elem().Kind() == reflect.Uint8 && rt.Len() <= 32 {
+				rv := reflect.ValueOf(arg)
+				b := make([]byte, rv.Len())
+				reflect.Copy(reflect.ValueOf(b), rv)
+				d, err := encodeFixedBytes(b, len(b))
+				return d, false, err
+			}
+			// Fixed-size array [N]T of static elements: N inline static words.
+			rv := reflect.ValueOf(arg)
+			var out []byte
+			for i := 0; i < rv.Len(); i++ {
+				elemData, elemDynamic, err := encodeArg(rv.Index(i).Interface())
+				if err != nil {
+					return nil, false, fmt.Errorf("encoding array element %d: %w", i, err)
+				}
+				if elemDynamic {
+					return nil, false, fmt.Errorf("unsupported dynamic element in fixed-size array: %T", arg)
+				}
+				out = append(out, elemData...)
+			}
+			return out, false, nil
+		}
+		return nil, false, fmt.Errorf("unsupported argument type: %T", arg)
+	}
 }`

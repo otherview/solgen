@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"reflect"
 	"strings"
 {{- range .Imports}}
 	"{{.}}"
@@ -121,6 +122,7 @@ func (h HexData) Bytes() []byte {
 ` + encodingHelpersTemplate + `
 
 ` + decodingHelpersTemplate + `
+` + decodeValueTemplate + `
 
 // Method information
 {{- range .Contract.Methods}}
@@ -232,83 +234,9 @@ func (pm *PackableMethod) Pack(args ...any) (HexData, error) {
 
 	encoded := make([]argEncoding, len(args))
 	for i, arg := range args {
-		var data []byte
-		var dynamic bool
-		var err error
-		switch v := arg.(type) {
-		case *big.Int:
-			if v.Sign() < 0 {
-				data, err = encodeInt256(v)
-			} else {
-				data, err = encodeUint256(v)
-			}
-			if err != nil {
-				return "", fmt.Errorf("encoding big.Int arg %d: %w", i, err)
-			}
-		case uint8:
-			data, err = encodeUint256(uint64(v))
-			if err != nil {
-				return "", fmt.Errorf("encoding uint8 arg %d: %w", i, err)
-			}
-		case uint16:
-			data, err = encodeUint256(uint64(v))
-			if err != nil {
-				return "", fmt.Errorf("encoding uint16 arg %d: %w", i, err)
-			}
-		case uint32:
-			data, err = encodeUint256(uint64(v))
-			if err != nil {
-				return "", fmt.Errorf("encoding uint32 arg %d: %w", i, err)
-			}
-		case uint64:
-			data, err = encodeUint256(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding uint64 arg %d: %w", i, err)
-			}
-		case int8:
-			data, err = encodeInt256(big.NewInt(int64(v)))
-			if err != nil {
-				return "", fmt.Errorf("encoding int8 arg %d: %w", i, err)
-			}
-		case int16:
-			data, err = encodeInt256(big.NewInt(int64(v)))
-			if err != nil {
-				return "", fmt.Errorf("encoding int16 arg %d: %w", i, err)
-			}
-		case int32:
-			data, err = encodeInt256(big.NewInt(int64(v)))
-			if err != nil {
-				return "", fmt.Errorf("encoding int32 arg %d: %w", i, err)
-			}
-		case int64:
-			data, err = encodeInt256(big.NewInt(v))
-			if err != nil {
-				return "", fmt.Errorf("encoding int64 arg %d: %w", i, err)
-			}
-		case Address:
-			data, err = encodeAddress(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding address arg %d: %w", i, err)
-			}
-		case bool:
-			data, err = encodeBool(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding bool arg %d: %w", i, err)
-			}
-		case string:
-			data, err = encodeString(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding string arg %d: %w", i, err)
-			}
-			dynamic = true
-		case []byte:
-			data, err = encodeBytes(v)
-			if err != nil {
-				return "", fmt.Errorf("encoding bytes arg %d: %w", i, err)
-			}
-			dynamic = true
-		default:
-			return "", fmt.Errorf("unsupported argument type: %T", arg)
+		data, dynamic, err := encodeArg(arg)
+		if err != nil {
+			return "", fmt.Errorf("encoding arg %d: %w", i, err)
 		}
 		encoded[i] = argEncoding{data: data, isDynamic: dynamic}
 	}

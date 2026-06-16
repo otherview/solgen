@@ -20,157 +20,152 @@ func (e *{{.Name}}EventDecoder) MustDecode(data []byte) {{.Struct.Name}} {
 	return result
 }
 
+// DecodeLog decodes a full log into {{.Struct.Name}}: non-indexed parameters are
+// read from data, while indexed parameters are read from topics (topics[0] is the
+// event signature, so indexed params start at topics[1]) in ABI order.
+//
+// Indexed dynamic types (string, bytes, arrays) are stored as the keccak hash of
+// their value in the topic and cannot be recovered to their original value; such
+// fields are left at their zero value.
+func (e *{{.Name}}EventDecoder) DecodeLog(topics [][32]byte, data []byte) ({{.Struct.Name}}, error) {
+	// Non-indexed parameters live in the data section.
+	result, err := e.decodeImpl(data)
+	if err != nil {
+		return result, err
+	}
+	{{- $hasIndexed := false}}
+	{{- range .Inputs}}{{- if .Indexed}}{{- $hasIndexed = true}}{{- end}}{{- end}}
+	{{- if $hasIndexed}}
+	// Indexed parameters live in the log topics, after the signature topic.
+	topicIndex := 1
+	{{- range $i, $input := .Inputs}}
+	{{- if $input.Indexed}}
+	if len(topics) <= topicIndex {
+		return result, errors.New("missing topic for indexed parameter {{$input.Name}}")
+	}
+	{
+		word := topics[topicIndex][:]
+		{{- if eq $input.Type.TypeName "*big.Int"}}
+		{{- if $input.Type.IsSigned}}
+		v, e := decodeInt256(word)
+		{{- else}}
+		v, e := decodeUint256(word)
+		{{- end}}
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "bool"}}
+		v, e := decodeBool(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "uint8"}}
+		v, e := decodeUint8(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "uint16"}}
+		v, e := decodeUint16(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "uint32"}}
+		v, e := decodeUint32(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "uint64"}}
+		v, e := decodeUint64(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "int8"}}
+		raw, e := decodeInt64(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = int8(raw)
+		{{- else if eq $input.Type.TypeName "int16"}}
+		raw, e := decodeInt64(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = int16(raw)
+		{{- else if eq $input.Type.TypeName "int32"}}
+		raw, e := decodeInt64(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = int32(raw)
+		{{- else if eq $input.Type.TypeName "int64"}}
+		v, e := decodeInt64(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "Address"}}
+		v, e := decodeAddress(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "Hash"}}
+		v, e := decodeHash(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "[1]byte"}}
+		v, e := decodeBytes1(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else if eq $input.Type.TypeName "[32]byte"}}
+		v, e := decodeBytes32(word)
+		if e != nil {
+			return result, fmt.Errorf("decoding indexed parameter {{$input.Name}}: %w", e)
+		}
+		result.{{$input.Name | title}} = v
+		{{- else}}
+		// Indexed {{$input.Type.TypeName}} is stored as a keccak hash in the topic
+		// and cannot be recovered; leaving {{$input.Name | title}} at its zero value.
+		_ = word
+		{{- end}}
+	}
+	topicIndex++
+	{{- end}}
+	{{- end}}
+	{{- end}}
+	return result, nil
+}
+
 // decodeImpl contains the actual decode logic
 func (e *{{.Name}}EventDecoder) decodeImpl(data []byte) ({{.Struct.Name}}, error) {
 	// Decode event parameters (only non-indexed parameters are in data)
 	var result {{.Struct.Name}}
-	{{- $hasNonIndexedParams := false}}
-	{{- range $i, $input := .Inputs}}
-	{{- if not $input.Indexed}}
-	{{- $hasNonIndexedParams = true}}
-	{{- end}}
-	{{- end}}
-	{{- if $hasNonIndexedParams}}
-	{{- $needsVal := false}}
-	{{- $needsValUint64 := false}}
-	{{- $needsValInt64 := false}}
-	{{- $needsValAddr := false}}
-	{{- $needsValBool := false}}
-	{{- $needsValString := false}}
-	{{- $needsValBytes := false}}
-	{{- range .Inputs}}
-		{{- if not .Indexed}}
-			{{- if eq .Type.TypeName "*big.Int"}}
-				{{- $needsVal = true}}
-			{{- end}}
-			{{- if eq .Type.TypeName "uint64"}}
-				{{- $needsValUint64 = true}}
-			{{- end}}
-			{{- if eq .Type.TypeName "int64"}}
-				{{- $needsValInt64 = true}}
-			{{- end}}
-			{{- if eq .Type.TypeName "Address"}}
-				{{- $needsValAddr = true}}
-			{{- end}}
-			{{- if eq .Type.TypeName "bool"}}
-				{{- $needsValBool = true}}
-			{{- end}}
-			{{- if eq .Type.TypeName "string"}}
-				{{- $needsValString = true}}
-			{{- end}}
-			{{- if eq .Type.TypeName "[]byte"}}
-				{{- $needsValBytes = true}}
-			{{- end}}
-		{{- end}}
-	{{- end}}
-	{{- if $needsVal}}
-	var val *big.Int
-	{{- end}}
-	{{- if $needsValUint64}}
-	var valUint64 uint64
-	{{- end}}
-	{{- if $needsValInt64}}
-	var valInt64 int64
-	{{- end}}
-	{{- if $needsValAddr}}
-	var valAddr Address
-	{{- end}}
-	{{- if $needsValBool}}
-	var valBool bool
-	{{- end}}
-	{{- if $needsValString}}
-	var valString string
-	{{- end}}
-	{{- if $needsValBytes}}
-	var valBytes []byte
-	{{- end}}
-	var err error
+	{{- $allSupported := true}}
+	{{- $hasNonIndexed := false}}
+	{{- range .Inputs}}{{- if not .Indexed}}{{- $hasNonIndexed = true}}{{- if not (decoderSupports .Type)}}{{- $allSupported = false}}{{- end}}{{- end}}{{- end}}
+	{{- if not $allSupported}}
+	return result, errors.New("unsupported parameter type in {{.Name}} event")
+	{{- else}}
+	{{- if $hasNonIndexed}}
 	offset := 0
 	{{- range $i, $input := .Inputs}}
 	{{- if not $input.Indexed}}
-	{{- if eq $input.Type.TypeName "*big.Int"}}
-	if len(data) < offset+32 {
-		return result, errors.New("insufficient data for event parameter {{$input.Name}}")
-	}
-	{{- if $input.Type.IsSigned}}
-	val, err = decodeInt256(data[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding event parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val
-	{{- else}}
-	val, err = decodeUint256(data[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding event parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = val
-	{{- end}}
-	offset += 32
-	{{- else if eq $input.Type.TypeName "uint64"}}
-	if len(data) < offset+32 {
-		return result, errors.New("insufficient data for event parameter {{$input.Name}}")
-	}
-	valUint64, err = decodeUint64(data[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding event parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = valUint64
-	offset += 32
-	{{- else if eq $input.Type.TypeName "int64"}}
-	if len(data) < offset+32 {
-		return result, errors.New("insufficient data for event parameter {{$input.Name}}")
-	}
-	valInt64, err = decodeInt64(data[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding event parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = valInt64
-	offset += 32
-	{{- else if eq $input.Type.TypeName "bool"}}
-	if len(data) < offset+32 {
-		return result, errors.New("insufficient data for event parameter {{$input.Name}}")
-	}
-	valBool, err = decodeBool(data[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding event parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = valBool
-	offset += 32
-	{{- else if eq $input.Type.TypeName "Address"}}
-	if len(data) < offset+32 {
-		return result, errors.New("insufficient data for event parameter {{$input.Name}}")
-	}
-	valAddr, err = decodeAddress(data[offset:offset+32])
-	if err != nil {
-		return result, fmt.Errorf("decoding event parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = valAddr
-	offset += 32
-	{{- else if eq $input.Type.TypeName "string"}}
-	var nextOffset int
-	valString, nextOffset, err = decodeString(data, offset)
-	if err != nil {
-		return result, fmt.Errorf("decoding event parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = valString
-	offset = nextOffset
-	{{- else if eq $input.Type.TypeName "[]byte"}}
-	var nextOffset int
-	valBytes, nextOffset, err = decodeBytes(data, offset)
-	if err != nil {
-		return result, fmt.Errorf("decoding event parameter {{$input.Name}}: %w", err)
-	}
-	result.{{$input.Name | title}} = valBytes
-	offset = nextOffset
-	{{- else}}
-	return result, errors.New("unsupported event parameter type: {{$input.Type.TypeName}}")
+	{{- template "decodeValue" (dict "Data" "data" "Field" (printf "result.%s" ($input.Name | title)) "T" $input.Type "Ctx" (printf "event parameter %s" $input.Name) "Zero" "result")}}
 	{{- end}}
 	{{- end}}
-	{{- end}}
-	{{- else}}
-	// Event has no non-indexed parameters, return empty struct
 	{{- end}}
 	return result, nil
+	{{- end}}
 }
 {{- end}}`
 
